@@ -1,11 +1,11 @@
 # Glue CLI
 
-Glue is a command-line tool that synchronizes GitHub issues with project management tools like JIRA and Trello.
+Glue is a command-line tool that synchronizes GitHub issues with project management tools like JIRA.
 
 ## Features
 
 - Initializes GitHub repositories with necessary labels
-- Synchronizes GitHub issues with JIRA tickets or Trello cards
+- Synchronizes GitHub issues with JIRA tickets
 - Provides status information about synchronization
 - Supports different issue types (Story, Feature)
 
@@ -15,7 +15,7 @@ Glue is a command-line tool that synchronizes GitHub issues with project managem
 
 - Go 1.16 or higher
 - GitHub access token with repo scope
-- JIRA access token or Trello API key and token
+- JIRA access token
 
 ### Building from source
 
@@ -37,10 +37,6 @@ export GITHUB_TOKEN=your_github_token
 export JIRA_URL=https://your-domain.atlassian.net
 export JIRA_USERNAME=your_email@example.com
 export JIRA_TOKEN=your_jira_api_token
-
-# For Trello integration
-export TRELLO_API_KEY=your_trello_api_key
-export TRELLO_TOKEN=your_trello_token
 ```
 
 ## Usage
@@ -67,22 +63,11 @@ This command will:
 2. Create JIRA tickets for each issue
 3. Add the `glued` label to the GitHub issues
 
-### Synchronize GitHub issues with Trello
-
-```bash
-glue trello sync --repository username/repo --board "Board Name"
-```
-
-This command works similarly to the JIRA sync command but creates Trello cards instead.
-
 ### Check synchronization status
 
 ```bash
 # For JIRA
 glue jira status --repository username/repo --board PROJECT_NAME
-
-# For Trello
-glue trello status --repository username/repo --board "Board Name"
 ```
 
 These commands will show statistics about synchronized and non-synchronized issues.
@@ -97,7 +82,6 @@ glue/
 ├── internal/        # Internal packages
 │   ├── github/      # GitHub API client
 │   ├── jira/        # JIRA API client
-│   ├── trello/      # Trello API client
 │   └── common/      # Shared utilities
 ├── pkg/             # Public packages
 │   └── models/      # Data models

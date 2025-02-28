@@ -1,94 +1,75 @@
+// Package github provides functionality for interacting with the GitHub API.
 package github
 
 import (
 	"context"
+
 	"fmt"
 	"log"
-	"os"
+	"regexp"
 	"strings"
+	"time"
 
-	"github.com/dolaszy/glue/pkg/models"
+	"github.com/danielolaszy/glue/pkg/models"
 	"github.com/google/go-github/v41/github"
 	"golang.org/x/oauth2"
+	"github.com/danielolaszy/glue/internal/config"
 )
 
-// Client handles interactions with the GitHub API
+// Client handles interactions with the GitHub API.
 type Client struct {
 	client *github.Client
 }
 
-// NewClient creates a new GitHub client
-func NewClient() *Client {
-	// Get GitHub token from environment variable
-	token := os.Getenv("GITHUB_TOKEN")
-	if token == "" {
-		log.Println("Warning: GITHUB_TOKEN environment variable not set")
+// NewClient creates a new GitHub API client.
+func NewClient() (*Client, error) {
+	config, err := config.LoadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Create OAuth2 client
-	ctx := context.Background()
+	token := config.GitHub.Token
+	if token == "" {
+		return nil, fmt.Errorf("GitHub token not found in configuration")
+	}
+
+	// Debug output
+	log.Printf("Found token (length: %d, first 4 chars: %s...)", len(token), token[:4])
+
+	// Create the client
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: token},
 	)
-	tc := oauth2.NewClient(ctx, ts)
-
-	// Create GitHub client
+	tc := oauth2.NewClient(context.Background(), ts)
 	client := github.NewClient(tc)
 
-	return &Client{
-		client: client,
+	// Test the token
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	user, resp, err := client.Users.Get(ctx, "")
+	if err != nil {
+		log.Printf("Error testing token: %v", err)
+		return nil, fmt.Errorf("error testing GitHub token: %w", err)
 	}
+
+	log.Printf("Token test result: %d %s", resp.StatusCode, resp.Status)
+	if user.Login != nil {
+		log.Printf("Authenticated as: %s", *user.Login)
+	}
+
+	return &Client{client: client}, nil
 }
 
-// InitializeLabels creates the required labels in the repository if they don't exist
-func (c *Client) InitializeLabels(repository string) error {
-	// Parse repository owner and name
-	parts := strings.Split(repository, "/")
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid repository format: %s, expected format: owner/repo", repository)
-	}
-	owner, repo := parts[0], parts[1]
-
-	// Required labels
-	requiredLabels := []string{"story", "feature", "glued"}
-
-	// Context for API requests
-	ctx := context.Background()
-
-	// Check and create each label
-	for _, label := range requiredLabels {
-		// Try to get the label
-		_, resp, err := c.client.Issues.GetLabel(ctx, owner, repo, label)
-
-		if err != nil && resp.StatusCode == 404 {
-			// Label doesn't exist, create it
-			color := getLabelColor(label)
-			description := getLabelDescription(label)
-
-			newLabel := &github.Label{
-				Name:        github.String(label),
-				Color:       github.String(color),
-				Description: github.String(description),
-			}
-
-			_, _, err := c.client.Issues.CreateLabel(ctx, owner, repo, newLabel)
-			if err != nil {
-				return fmt.Errorf("failed to create label '%s': %v", label, err)
-			}
-
-			fmt.Printf("Created label '%s'\n", label)
-		} else if err != nil {
-			return fmt.Errorf("error checking label '%s': %v", label, err)
-		} else {
-			fmt.Printf("Label '%s' already exists\n", label)
-		}
-	}
-
-	return nil
-}
-
-// GetUnglued returns GitHub issues without the 'glued' label
-func (c *Client) GetUnglued(repository string) ([]models.GitHubIssue, error) {
+// GetAllIssues retrieves all open issues from a GitHub repository.
+//
+// Parameters:
+//   - repository: The GitHub repository in the format "owner/repo"
+//
+// Returns:
+//   - A slice of GitHubIssue objects representing the open issues
+//   - An error if the issues couldn't be retrieved
+func (c *Client) GetAllIssues(repository string) ([]models.GitHubIssue, error) {
 	// Parse repository owner and name
 	parts := strings.Split(repository, "/")
 	if len(parts) != 2 {
@@ -122,7 +103,7 @@ func (c *Client) GetUnglued(repository string) ([]models.GitHubIssue, error) {
 		opts.Page = resp.NextPage
 	}
 
-	// Filter issues without the 'glued' label
+	// Filter out pull requests and convert to our internal model
 	var result []models.GitHubIssue
 	for _, issue := range allIssues {
 		// Skip pull requests (they're also returned by the Issues API)
@@ -130,49 +111,39 @@ func (c *Client) GetUnglued(repository string) ([]models.GitHubIssue, error) {
 			continue
 		}
 
-		// Check if the issue has the 'glued' label
-		hasGluedLabel := false
-		issueType := ""
-
+		// Convert to our internal model
+		labelNames := make([]string, 0, len(issue.Labels))
 		for _, label := range issue.Labels {
-			if *label.Name == "glued" {
-				hasGluedLabel = true
-			}
-			if *label.Name == "story" {
-				issueType = "story"
-			}
-			if *label.Name == "feature" {
-				issueType = "feature"
-			}
+			labelNames = append(labelNames, *label.Name)
 		}
 
-		if !hasGluedLabel {
-			// Convert to our internal model
-			labelNames := make([]string, 0, len(issue.Labels))
-			for _, label := range issue.Labels {
-				labelNames = append(labelNames, *label.Name)
-			}
-
-			description := ""
-			if issue.Body != nil {
-				description = *issue.Body
-			}
-
-			result = append(result, models.GitHubIssue{
-				Number:      *issue.Number,
-				Title:       *issue.Title,
-				Description: description,
-				Labels:      labelNames,
-				Type:        issueType,
-			})
+		description := ""
+		if issue.Body != nil {
+			description = *issue.Body
 		}
+
+		result = append(result, models.GitHubIssue{
+			Number:      *issue.Number,
+			Title:       *issue.Title,
+			Description: description,
+			Labels:      labelNames,
+		})
 	}
 
 	return result, nil
 }
 
-// AddGluedLabel adds the 'glued' label to a GitHub issue
-func (c *Client) AddGluedLabel(repository string, issueNumber int) error {
+// AddLabels adds one or more labels to a GitHub issue. If the labels don't exist
+// in the repository, they will be automatically created by GitHub.
+//
+// Parameters:
+//   - repository: The GitHub repository in the format "owner/repo"
+//   - issueNumber: The number of the issue to add labels to
+//   - labels: One or more label strings to add to the issue
+//
+// Returns:
+//   - An error if the labels couldn't be added
+func (c *Client) AddLabels(repository string, issueNumber int, labels ...string) error {
 	// Parse repository owner and name
 	parts := strings.Split(repository, "/")
 	if len(parts) != 2 {
@@ -183,98 +154,117 @@ func (c *Client) AddGluedLabel(repository string, issueNumber int) error {
 	// Context for API requests
 	ctx := context.Background()
 
-	// Add the 'glued' label
-	_, _, err := c.client.Issues.AddLabelsToIssue(ctx, owner, repo, issueNumber, []string{"glued"})
-	return err
+	// Log the operation
+	log.Printf("Adding labels %v to issue %s#%d", labels, repo, issueNumber)
+
+	// Add the labels to the issue
+	// GitHub will automatically create labels that don't exist
+	_, _, err := c.client.Issues.AddLabelsToIssue(ctx, owner, repo, issueNumber, labels)
+
+	// Check for errors
+	if err != nil {
+		log.Printf("Error adding labels to issue: %v", err)
+		return fmt.Errorf("failed to add labels to issue %s#%d: %v", repo, issueNumber, err)
+	}
+
+	log.Printf("Successfully added label(s) %v to issue %s#%d", labels, repo, issueNumber)
+	return nil
 }
 
-// GetSyncStats returns statistics about synchronized and non-synchronized GitHub issues
-func (c *Client) GetSyncStats(repository string) (int, int, error) {
+// GetLabelsForIssue retrieves all labels for a specific GitHub issue.
+//
+// Parameters:
+//   - repository: The GitHub repository in the format "owner/repo"
+//   - issueNumber: The number of the issue to get labels for
+//
+// Returns:
+//   - A slice of strings representing the label names
+//   - An error if the labels couldn't be retrieved
+func (c *Client) GetLabelsForIssue(repository string, issueNumber int) ([]string, error) {
 	// Parse repository owner and name
 	parts := strings.Split(repository, "/")
 	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("invalid repository format: %s, expected format: owner/repo", repository)
+		return nil, fmt.Errorf("invalid repository format: %s, expected format: owner/repo", repository)
 	}
 	owner, repo := parts[0], parts[1]
 
 	// Context for API requests
 	ctx := context.Background()
 
-	// Get all open issues
-	opts := &github.IssueListByRepoOptions{
-		State: "open",
-		ListOptions: github.ListOptions{
-			PerPage: 100,
-		},
+	// Log the operation
+	log.Printf("Retrieving labels for issue #%d in repository %s/%s", issueNumber, owner, repo)
+
+	// Get the labels for the issue
+	// The GitHub API returns an array of label objects
+	labels, _, err := c.client.Issues.ListLabelsByIssue(ctx, owner, repo, issueNumber, nil)
+
+	// Check for errors
+	if err != nil {
+		log.Printf("Error retrieving labels for issue: %v", err)
+		return nil, fmt.Errorf("failed to retrieve labels for issue #%d: %v", issueNumber, err)
 	}
 
-	var allIssues []*github.Issue
-	for {
-		issues, resp, err := c.client.Issues.ListByRepo(ctx, owner, repo, opts)
-		if err != nil {
-			return 0, 0, fmt.Errorf("failed to fetch GitHub issues: %v", err)
-		}
-
-		allIssues = append(allIssues, issues...)
-
-		if resp.NextPage == 0 {
-			break
-		}
-		opts.Page = resp.NextPage
+	// Convert the GitHub label objects to an array of strings
+	// Each GitHub label object contains Name, Color, and Description fields
+	labelNames := make([]string, len(labels))
+	for i, label := range labels {
+		labelNames[i] = label.GetName()
 	}
 
-	// Count issues with and without the 'glued' label
-	glued := 0
-	unglued := 0
-
-	for _, issue := range allIssues {
-		// Skip pull requests
-		if issue.PullRequestLinks != nil {
-			continue
-		}
-
-		// Check if the issue has the 'glued' label
-		hasGluedLabel := false
-		for _, label := range issue.Labels {
-			if *label.Name == "glued" {
-				hasGluedLabel = true
-				break
-			}
-		}
-
-		if hasGluedLabel {
-			glued++
-		} else {
-			unglued++
-		}
-	}
-
-	return glued, unglued, nil
+	log.Printf("Retrieved %d labels for issue #%d", len(labelNames), issueNumber)
+	return labelNames, nil
 }
 
-// Helper functions for label creation
-func getLabelColor(label string) string {
-	switch label {
-	case "story":
-		return "0075ca" // Blue
-	case "feature":
-		return "7057ff" // Purple
-	case "glued":
-		return "d4c5f9" // Light purple
-	default:
-		return "cccccc" // Light gray
+// HasLabel checks if a GitHub issue has a specific label.
+//
+// Parameters:
+//   - repository: The GitHub repository in the format "owner/repo"
+//   - issueNumber: The number of the issue to check
+//   - labelName: The exact name of the label to check for
+//
+// Returns:
+//   - true if the issue has the label, false otherwise
+//   - An error if there was a problem checking the labels
+func (c *Client) HasLabel(repository string, issueNumber int, labelName string) (bool, error) {
+	// Get all labels for the issue
+	labels, err := c.GetLabelsForIssue(repository, issueNumber)
+	if err != nil {
+		return false, err
 	}
+
+	// Check if the specific label exists in the list
+	for _, label := range labels {
+		if label == labelName {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
-func getLabelDescription(label string) string {
-	switch label {
-	case "story":
-		return "User story"
-	case "feature":
-		return "Feature request"
-	case "glued":
-		return "Synchronized with project management tool"
-	default:
-		return ""
+// HasLabelMatching checks if a GitHub issue has any label matching the given pattern.
+//
+// Parameters:
+//   - repository: The GitHub repository in the format "owner/repo"
+//   - issueNumber: The number of the issue to check
+//   - pattern: A compiled regular expression pattern to match against label names
+//
+// Returns:
+//   - true if any label matches the pattern, false otherwise
+//   - An error if there was a problem checking the labels
+func (c *Client) HasLabelMatching(repository string, issueNumber int, pattern *regexp.Regexp) (bool, error) {
+	// Get all labels for the issue
+	labels, err := c.GetLabelsForIssue(repository, issueNumber)
+	if err != nil {
+		return false, err
 	}
+
+	// Check if any label matches the pattern
+	for _, label := range labels {
+		if pattern.MatchString(label) {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
