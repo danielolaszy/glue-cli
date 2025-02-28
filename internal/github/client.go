@@ -5,7 +5,6 @@ import (
 	"context"
 
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/google/go-github/v41/github"
 	"golang.org/x/oauth2"
 	"github.com/danielolaszy/glue/internal/config"
+	"github.com/danielolaszy/glue/internal/logging"
 )
 
 // Client handles interactions with the GitHub API.
@@ -30,11 +30,11 @@ func NewClient() (*Client, error) {
 
 	token := config.GitHub.Token
 	if token == "" {
-		return nil, fmt.Errorf("GitHub token not found in configuration")
+		return nil, fmt.Errorf("github token not found in configuration")
 	}
 
 	// Debug output
-	log.Printf("Found token (length: %d, first 4 chars: %s...)", len(token), token[:4])
+	logging.Info("github configuration", "token_length", len(token))
 
 	// Create the client
 	ts := oauth2.StaticTokenSource(
@@ -47,15 +47,14 @@ func NewClient() (*Client, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	user, resp, err := client.Users.Get(ctx, "")
+	user, _, err := client.Users.Get(ctx, "")
 	if err != nil {
-		log.Printf("Error testing token: %v", err)
-		return nil, fmt.Errorf("error testing GitHub token: %w", err)
+		logging.Error("failed to test github token", "error", err)
+		return nil, fmt.Errorf("error testing github token: %w", err)
 	}
 
-	log.Printf("Token test result: %d %s", resp.StatusCode, resp.Status)
 	if user.Login != nil {
-		log.Printf("Authenticated as: %s", *user.Login)
+		logging.Info("github authentication successful", "username", *user.Login)
 	}
 
 	return &Client{client: client}, nil
@@ -92,6 +91,7 @@ func (c *Client) GetAllIssues(repository string) ([]models.GitHubIssue, error) {
 	for {
 		issues, resp, err := c.client.Issues.ListByRepo(ctx, owner, repo, opts)
 		if err != nil {
+			logging.Error("failed to fetch github issues", "error", err)
 			return nil, fmt.Errorf("failed to fetch GitHub issues: %v", err)
 		}
 
@@ -155,7 +155,7 @@ func (c *Client) AddLabels(repository string, issueNumber int, labels ...string)
 	ctx := context.Background()
 
 	// Log the operation
-	log.Printf("Adding labels %v to issue %s#%d", labels, repo, issueNumber)
+	logging.Info("adding labels", "labels", labels, "issue_number", issueNumber)
 
 	// Add the labels to the issue
 	// GitHub will automatically create labels that don't exist
@@ -163,11 +163,11 @@ func (c *Client) AddLabels(repository string, issueNumber int, labels ...string)
 
 	// Check for errors
 	if err != nil {
-		log.Printf("Error adding labels to issue: %v", err)
+		logging.Error("error adding labels to issue", "repository", repository, "issue_number", issueNumber, "error", err)
 		return fmt.Errorf("failed to add labels to issue %s#%d: %v", repo, issueNumber, err)
 	}
 
-	log.Printf("Successfully added label(s) %v to issue %s#%d", labels, repo, issueNumber)
+	logging.Info("successfully added labels", "labels", labels, "repository", repository, "issue_number", issueNumber)
 	return nil
 }
 
@@ -192,7 +192,7 @@ func (c *Client) GetLabelsForIssue(repository string, issueNumber int) ([]string
 	ctx := context.Background()
 
 	// Log the operation
-	log.Printf("Retrieving labels for issue #%d in repository %s/%s", issueNumber, owner, repo)
+	logging.Info("retrieving labels", "repository", repository, "issue_number", issueNumber)
 
 	// Get the labels for the issue
 	// The GitHub API returns an array of label objects
@@ -200,8 +200,8 @@ func (c *Client) GetLabelsForIssue(repository string, issueNumber int) ([]string
 
 	// Check for errors
 	if err != nil {
-		log.Printf("Error retrieving labels for issue: %v", err)
-		return nil, fmt.Errorf("failed to retrieve labels for issue #%d: %v", issueNumber, err)
+		logging.Error("error retrieving labels", "repository", repository, "issue_number", issueNumber, "error", err)
+		return nil, fmt.Errorf("failed to retrieve labels for issue %s#%d: %v", repo, issueNumber, err)
 	}
 
 	// Convert the GitHub label objects to an array of strings
@@ -211,7 +211,7 @@ func (c *Client) GetLabelsForIssue(repository string, issueNumber int) ([]string
 		labelNames[i] = label.GetName()
 	}
 
-	log.Printf("Retrieved %d labels for issue #%d", len(labelNames), issueNumber)
+	logging.Info("successfully retrieved labels", "repository", repository, "issue_number", issueNumber, "number_of_labels", len(labelNames))
 	return labelNames, nil
 }
 

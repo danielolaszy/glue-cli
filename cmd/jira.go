@@ -3,12 +3,12 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/danielolaszy/glue/internal/github"
 	"github.com/danielolaszy/glue/internal/jira"
 	"github.com/spf13/cobra"
+	"github.com/danielolaszy/glue/internal/logging"
 )
 
 // jiraCmd represents the command to synchronize GitHub issues with JIRA.
@@ -45,17 +45,16 @@ Issues will be categorized based on their existing labels:
 			return fmt.Errorf("board flag is required")
 		}
 
-		fmt.Printf("Synchronizing GitHub repository '%s' with JIRA project '%s'\n", repository, board)
-
 		// Perform synchronization
 		syncCount, err := syncGitHubToJira(repository, board)
 		if err != nil {
-			log.Printf("Synchronization error: %v", err)
+			logging.Error("synchronization error", "error", err)
 			return err
 		}
-
-		fmt.Printf("\nSynchronization complete: %d issues synchronized with JIRA project '%s'\n", syncCount, board)
-
+		logging.Info("synchronization complete", 
+			"synchronized_count", syncCount, 
+			"jira_project", board,
+		)
 		return nil
 	},
 }
@@ -67,7 +66,7 @@ func init() {
 	jiraCmd.Flags().StringP("board", "b", "", "JIRA board/project key")
 }
 
-// syncGitHubToJira synchronizes GitHub issues with JIRA tickets.
+// syncGitHubToJira synchronizes GitHub issues with JIRA  tickets.
 //
 // Parameters:
 //   - repository: The GitHub repository name (e.g., "username/repo")
@@ -77,23 +76,28 @@ func init() {
 //   - The number of issues successfully synchronized
 //   - An error if the synchronization process failed
 func syncGitHubToJira(repository, jiraProjectKey string) (int, error) {
+	logging.Info("starting synchronization", 
+		"repository", repository, 
+		"jira_project", jiraProjectKey)
+	
 	// Initialize clients
 	githubClient, err := github.NewClient()
 	if err != nil {
-		return 0, fmt.Errorf("failed to initialize GitHub client: %w", err)
+		return 0, fmt.Errorf("failed to initialize github client: %w", err)
 	}
 	jiraClient, err := jira.NewClient()
 	if err != nil {
-		return 0, fmt.Errorf("failed to initialize JIRA client: %w", err)
+		return 0, fmt.Errorf("failed to initialize jira client: %w", err)
 	}
 
 	// Get all GitHub issues
 	issues, err := githubClient.GetAllIssues(repository)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch GitHub issues: %v", err)
+		logging.Error("failed to fetch github issues", "error", err)
+		return 0, fmt.Errorf("failed to fetch github issues: %v", err)
 	}
 
-	fmt.Printf("Found %d GitHub issues to process\n", len(issues))
+	logging.Info("found github issues", "count", len(issues), "repository", repository)
 	syncCount := 0
 
 	for _, issue := range issues {
@@ -101,9 +105,17 @@ func syncGitHubToJira(repository, jiraProjectKey string) (int, error) {
 		jiraIDPrefix := fmt.Sprintf("jira-id: %s-", jiraProjectKey)
 		hasProjectLabel := false
 
+		logging.Debug("checking labels for issue", 
+			"repository", repository, 
+			"issue_number", issue.Number,
+		)
+
 		labels, err := githubClient.GetLabelsForIssue(repository, issue.Number)
 		if err != nil {
-			log.Printf("Error fetching labels for issue #%d: %v", issue.Number, err)
+			logging.Error("failed to fetch labels for issue", 
+				"repository", repository,
+				"issue_number", issue.Number, 
+				"error", err)
 			continue
 		}
 
@@ -116,8 +128,11 @@ func syncGitHubToJira(repository, jiraProjectKey string) (int, error) {
 
 		if hasProjectLabel {
 			// Issue already synchronized with this project
-			log.Printf("Issue #%d already synchronized with JIRA project %s, skipping",
-				issue.Number, jiraProjectKey)
+			logging.Debug("issue already synchronized, skipping",
+				"repository", repository,
+				"issue_number", issue.Number, 
+				"jira_project", jiraProjectKey,
+			)
 			continue
 		}
 
@@ -134,10 +149,20 @@ func syncGitHubToJira(repository, jiraProjectKey string) (int, error) {
 		}
 
 		// Create JIRA ticket
-		fmt.Printf("Creating JIRA ticket for GitHub issue #%d: %s\n", issue.Number, issue.Title)
+		logging.Info("creating jira ticket", 
+			"repository", repository,
+			"issue_number", issue.Number, 
+			"jira_project", jiraProjectKey,
+			"issue_type", issueType,
+		)
 		ticketID, err := jiraClient.CreateTicket(jiraProjectKey, issue, issueType)
 		if err != nil {
-			log.Printf("Error creating JIRA ticket for issue #%d: %v", issue.Number, err)
+			logging.Error("error creating jira ticket", 
+				"repository", repository,
+				"issue_number", issue.Number, 
+				"jira_project", jiraProjectKey,
+				"error", err,
+			)
 			continue
 		}
 
@@ -145,11 +170,21 @@ func syncGitHubToJira(repository, jiraProjectKey string) (int, error) {
 		labelToAdd := fmt.Sprintf("jira-id: %s", ticketID)
 		err = githubClient.AddLabels(repository, issue.Number, labelToAdd)
 		if err != nil {
-			log.Printf("Warning: Failed to add JIRA ID label to GitHub issue #%d: %v",
-				issue.Number, err)
+			logging.Error("failed to add label to github issue", 
+				"label", labelToAdd,
+				"repository", repository,
+				"issue_number", issue.Number,
+				"jira_project", jiraProjectKey,
+				"error", err,
+			)
 		}
 
-		fmt.Printf("Created JIRA ticket %s for GitHub issue #%d\n", ticketID, issue.Number)
+		logging.Info("created jira ticket", 
+			"jira_ticket_id", ticketID,
+			"jira_project", jiraProjectKey,
+			"repository", repository,
+			"issue_number", issue.Number,
+		)
 		syncCount++
 	}
 

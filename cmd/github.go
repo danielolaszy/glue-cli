@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"github.com/danielolaszy/glue/internal/github"
+	"github.com/danielolaszy/glue/internal/logging"
 	"regexp"
 
 	"github.com/spf13/cobra"
@@ -45,14 +46,10 @@ This command creates the required labels in your GitHub repository:
 			return err
 		}
 		if has == true {
-			fmt.Println("GitHub issue is a feature")
+			logging.Info("gitHub issue is a feature")
 		} else {
-			fmt.Println("GitHub issue is not a feature")
+			logging.Info("gitHub issue is not a feature")
 		}
-
-		fmt.Printf("Initializing GitHub repository: %s\n", repository)
-
-		fmt.Printf("Initializing GitHub repository: %s\n", repository)
 
 		return nil
 	},
