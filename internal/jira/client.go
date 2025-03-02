@@ -532,6 +532,11 @@ func (c *Client) CreateParentChildLink(parentKey, childKey string) error {
 	logging.Info("creating parent-child relationship in JIRA", 
 		"parent", parentKey, 
 		"child", childKey)
+	
+	// Check if the client is initialized
+	if c.client == nil {
+		return fmt.Errorf("jira client not initialized")
+	}
 
 	// Use issue linking API instead of parent field
 	linkData := map[string]interface{}{

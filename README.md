@@ -30,11 +30,33 @@ The following environment variables need to be set:
 ```bash
 # GitHub
 export GITHUB_TOKEN=your_github_token
+# Optional: for GitHub Enterprise (defaults to github.com if not specified)
+export GITHUB_DOMAIN=github.example.com
 
 # For JIRA integration
 export JIRA_URL=https://your-domain.atlassian.net
 export JIRA_USERNAME=your_email@example.com
 export JIRA_TOKEN=your_jira_api_token
+```
+
+## GitHub Enterprise Support
+
+Glue now supports GitHub Enterprise installations with the following features:
+
+- Configure your GitHub Enterprise domain using the `GITHUB_DOMAIN` environment variable
+- Automatic parsing of issue links regardless of domain (works with both public GitHub and Enterprise instances)
+- Proper API URL construction for different GitHub environments
+
+To use with GitHub Enterprise:
+
+1. Set the `GITHUB_DOMAIN` environment variable to your GitHub Enterprise domain (e.g., `github.example.com`)
+2. Ensure your GitHub token has appropriate permissions for your Enterprise instance
+3. Use the tool as normal - issue links will be correctly parsed regardless of the domain
+
+You can test your configuration by running:
+
+```bash
+glue jira --repository username/repo
 ```
 
 ## Usage
