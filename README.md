@@ -1,13 +1,11 @@
 # Glue CLI
 
-Glue is a command-line tool that synchronizes GitHub issues with project management tools like JIRA.
+Glue is a command-line tool that synchronizes GitHub issues with Jira.
 
 ## Features
 
-- Initializes GitHub repositories with necessary labels
-- Synchronizes GitHub issues with JIRA tickets
-- Provides status information about synchronization
-- Supports different issue types (Story, Feature)
+- Synchronizes GitHub issues with Jira tickets
+- Routes issues to specific Jira boards using labels
 
 ## Installation
 
@@ -15,7 +13,7 @@ Glue is a command-line tool that synchronizes GitHub issues with project managem
 
 - Go 1.16 or higher
 - GitHub access token with repo scope
-- JIRA access token
+- Jira access token
 
 ### Building from source
 
@@ -41,59 +39,31 @@ export JIRA_TOKEN=your_jira_api_token
 
 ## Usage
 
-### Initialize GitHub repository with required labels
+### Using labels to route issues to specific Jira boards
+
+A GitHub issue MUST have a `jira-project: BOARD_NAME` label to specify which Jira project board the issue should be created on. For example:
+
+- Add `jira-project: LEGGCP` to create the Jira ticket on the LEGGCP board
+- Add `jira-project: LEGAWS` to create the Jira ticket on the LEGAWS board
+
+Issues without a `jira-project:` label will be skipped during synchronization.
+
+### Synchronizing GitHub issues with Jira
+
+To synchronize all GitHub issues with Jira:
 
 ```bash
-glue github init --repository username/repo
+glue jira --repository username/repo
 ```
 
-This command will create the following labels in your GitHub repository if they don't already exist:
-- `story`: For user stories
-- `feature`: For feature requests
-- `glued`: For issues that have been synchronized with your project management tool
+This will:
+1. Find all GitHub issues with a `jira-project:` label
+2. Create Jira tickets on the specified boards if they don't already exist
+3. Add a `jira-id: PROJECT-123` label to each synchronized GitHub issue
 
-### Synchronize GitHub issues with JIRA
+## Issue typing
 
-```bash
-glue jira sync --repository username/repo --board PROJECT_NAME
-```
-
-This command will:
-1. Get all open GitHub issues without the `glued` label
-2. Create JIRA tickets for each issue
-3. Add the `glued` label to the GitHub issues
-
-### Check synchronization status
-
-```bash
-# For JIRA
-glue jira status --repository username/repo --board PROJECT_NAME
-```
-
-These commands will show statistics about synchronized and non-synchronized issues.
-
-## Development
-
-### Project Structure
-
-```
-glue/
-├── cmd/             # Command implementations
-├── internal/        # Internal packages
-│   ├── github/      # GitHub API client
-│   ├── jira/        # JIRA API client
-│   └── common/      # Shared utilities
-├── pkg/             # Public packages
-│   └── models/      # Data models
-└── main.go          # Entry point
-```
-
-### Testing
-
-```bash
-go test ./...
-```
-
-## License
-
-MIT
+Issues are categorized based on their GitHub labels:
+- GitHub issues with a `type: feature` label will be created as "Feature" type in Jira
+- GitHub issues with a `type: story` label will be created as "Story" type in Jira
+- If no type label is present, they'll default to "Story" type

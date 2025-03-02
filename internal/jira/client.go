@@ -19,6 +19,8 @@ type Client struct {
 	BaseURL  string
 	Username string
 	Token    string
+	// Cache for issue types by project key
+	issueTypeCache map[string]map[string]string // projectKey -> typeName -> typeID
 }
 
 // NewClient creates a new JIRA API client instance.
@@ -81,6 +83,7 @@ func NewClient() (*Client, error) {
 	
 	return &Client{
 		client: client,
+		issueTypeCache: make(map[string]map[string]string),
 	}, nil
 }
 
@@ -406,45 +409,32 @@ func (c *Client) EnsureIssueTypeExists(projectKey, typeName string) (string, err
 // GetIssueTypeID retrieves the ID of a specific issue type from a JIRA project.
 // If the issue type is not found, it returns an error.
 func (c *Client) GetIssueTypeID(projectKey, typeName string) (string, error) {
-	if c.client == nil {
-		return "", fmt.Errorf("jira client not initialized")
-	}
-
+	typeName = strings.ToLower(typeName)
 	logging.Debug("retrieving issue type id", "project", projectKey, "type", typeName)
-
-	// Get the project to see available issue types
-	project, resp, err := c.client.Project.Get(projectKey)
-	if err != nil {
-		logging.Error("failed to get jira project", 
-			"project", projectKey, 
-			"error", err, 
-			"status_code", resp.StatusCode)
-		return "", fmt.Errorf("failed to get jira project '%s': %v", projectKey, err)
-	}
-
-
-	logging.Debug("available issue types in project", "project", projectKey)
-	var availableTypes []string
 	
-	for _, issueType := range project.IssueTypes {
-		availableTypes = append(availableTypes, issueType.Name)
-		logging.Debug("issue type found", "name", issueType.Name, "id", issueType.ID)
+	// Check if we have cached issue types for this project
+	if projectTypes, exists := c.issueTypeCache[projectKey]; exists {
+		// Check if the requested type exists in the cache
+		if typeID, exists := projectTypes[typeName]; exists {
+			logging.Info("found issue type in cache", "name", typeName, "id", typeID)
+			return typeID, nil
+		}
+	} else {
+		// Load issue types for the project
+		err := c.LoadIssueTypes(projectKey)
+		if err != nil {
+			return "", err
+		}
 		
-		// Case insensitive match
-		if strings.EqualFold(issueType.Name, typeName) {
-			logging.Info("found issue type", "name", issueType.Name, "id", issueType.ID)
-			return issueType.ID, nil
+		// Now check the cache again
+		if typeID, exists := c.issueTypeCache[projectKey][typeName]; exists {
+			logging.Info("found issue type", "name", typeName, "id", typeID)
+			return typeID, nil
 		}
 	}
-
-	// If we get here, the issue type wasn't found
-	logging.Error("required issue type not found", 
-		"type", typeName, 
-		"project", projectKey, 
-		"available_types", strings.Join(availableTypes, ", "))
-		
-	return "", fmt.Errorf("required issue type '%s' not found in project '%s'. Available types: %s", 
-		typeName, projectKey, strings.Join(availableTypes, ", "))
+	
+	// If we reach here, the issue type doesn't exist in the project
+	return "", fmt.Errorf("issue type '%s' not found in project '%s'", typeName, projectKey)
 }
 
 // CreateTicketWithTypeID creates a new JIRA ticket with a specific issue type ID.
@@ -508,4 +498,33 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 
 	logging.Info("created jira ticket", "key", newIssue.Key)
 	return newIssue.Key, nil
+}
+
+// Add a method to load all issue types for a project
+func (c *Client) LoadIssueTypes(projectKey string) error {
+	logging.Debug("loading all issue types for project", "project", projectKey)
+	
+	// Create the cache entry for this project if it doesn't exist
+	if _, exists := c.issueTypeCache[projectKey]; !exists {
+		c.issueTypeCache[projectKey] = make(map[string]string)
+	}
+	
+	// Get all issue types for the project
+	project, _, err := c.client.Project.Get(projectKey)
+	if err != nil {
+		logging.Error("failed to get project", "project", projectKey, "error", err)
+		return err
+	}
+	
+	logging.Debug("available issue types in project", "project", projectKey)
+	for _, issueType := range project.IssueTypes {
+		typeName := strings.ToLower(issueType.Name)
+		typeID := issueType.ID
+		
+		// Cache the issue type
+		c.issueTypeCache[projectKey][typeName] = typeID
+		logging.Debug("cached issue type", "name", issueType.Name, "id", typeID)
+	}
+	
+	return nil
 }
