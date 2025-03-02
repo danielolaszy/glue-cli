@@ -528,3 +528,43 @@ func (c *Client) LoadIssueTypes(projectKey string) error {
 	
 	return nil
 }
+
+// CreateParentChildLink establishes a parent-child relationship between JIRA tickets.
+// parentKey is the key of the parent ticket (e.g., "PROJECT-123")
+// childKey is the key of the child ticket to link to the parent.
+func (c *Client) CreateParentChildLink(parentKey, childKey string) error {
+	logging.Info("creating parent-child relationship in JIRA", 
+		"parent", parentKey, 
+		"child", childKey)
+
+	// Use issue linking API instead of parent field
+	linkData := map[string]interface{}{
+		"type": map[string]string{
+			"name": "Relates", // Or another relationship type like "Blocks" or a custom one
+		},
+		"inwardIssue": map[string]string{
+			"key": childKey,
+		},
+		"outwardIssue": map[string]string{
+			"key": parentKey,
+		},
+	}
+	
+	// Create the request
+	req, err := c.client.NewRequest("POST", "rest/api/2/issueLink", linkData)
+	if err != nil {
+		return fmt.Errorf("failed to create request for linking issues: %v", err)
+	}
+	
+	// Send the request
+	resp, err := c.client.Do(req, nil)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		return fmt.Errorf("failed to link issues: %v (status: %d)", err, statusCode)
+	}
+	
+	return nil
+}

@@ -1,9 +1,10 @@
-// Package cmd provides the command-line interface for the Glue CLI tool.
 package cmd
 
 import (
 	"fmt"
 	"strings"
+	"regexp"
+	"strconv"
 
 	"github.com/danielolaszy/glue/internal/github"
 	"github.com/danielolaszy/glue/internal/jira"
@@ -102,6 +103,202 @@ func syncGitHubToJira(repository string) (int, error) {
 		return 0, fmt.Errorf("failed to initialize jira client: %w", err)
 	}
 
+	// First pass: Create all tickets (existing code)
+	syncCount, err := createJiraTickets(repository, githubClient, jiraClient)
+	if err != nil {
+		return syncCount, err
+	}
+	
+	// Second pass: Establish hierarchies
+	hierarchyCount, err := establishHierarchies(repository, githubClient, jiraClient)
+	if err != nil {
+		logging.Error("error establishing hierarchies", "error", err)
+		// Continue anyway, we've created the tickets at least
+	} else {
+		logging.Info("established hierarchical relationships", "count", hierarchyCount)
+	}
+	
+	return syncCount, nil
+}
+
+// hasLabel checks if a specific label is present in a slice of labels.
+func hasLabel(labels []string, targetLabel string) bool {
+	for _, label := range labels {
+		if strings.EqualFold(label, targetLabel) {
+			return true
+		}
+	}
+	return false
+}
+
+// establishHierarchies creates parent-child relationships in JIRA based on
+// GitHub issue links in feature issue descriptions.
+func establishHierarchies(repository string, githubClient *github.Client, jiraClient *jira.Client) (int, error) {
+	// Get all GitHub issues
+	issues, err := githubClient.GetAllIssues(repository)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch github issues: %v", err)
+	}
+	
+	linkCount := 0
+	
+	// Find feature issues
+	for _, issue := range issues {
+		labels, err := githubClient.GetLabelsForIssue(repository, issue.Number)
+		if err != nil {
+			logging.Error("failed to fetch labels for issue",
+				"repository", repository,
+				"issue_number", issue.Number,
+				"error", err)
+			continue
+		}
+		
+		// Only process feature issues
+		if !hasLabel(labels, "type: feature") {
+			continue
+		}
+		
+		// Find the JIRA ID for this feature
+		parentJiraID, found := findJiraIDFromLabels(labels)
+		if !found {
+			logging.Warn("feature issue has no JIRA ID, skipping hierarchy",
+				"repository", repository, 
+				"issue_number", issue.Number)
+			continue
+		}
+		
+		// Parse the child issues from the description
+		childLinks := parseChildIssues(issue.Description)
+		if len(childLinks) == 0 {
+			logging.Debug("feature issue has no child issues",
+				"repository", repository,
+				"issue_number", issue.Number)
+			continue
+		}
+		
+		logging.Info("found child issues in feature description",
+			"repository", repository,
+			"issue_number", issue.Number,
+			"child_count", len(childLinks))
+		
+		// Process each child issue
+		for _, link := range childLinks {
+			childRepo, childIssueNum, err := parseGitHubIssueLink(link)
+			if err != nil {
+				logging.Error("failed to parse child issue link",
+					"link", link,
+					"error", err)
+				continue
+			}
+			
+			// Get the child issue's labels
+			childLabels, err := githubClient.GetLabelsForIssue(childRepo, childIssueNum)
+			if err != nil {
+				logging.Error("failed to fetch labels for child issue",
+					"repository", childRepo,
+					"issue_number", childIssueNum,
+					"error", err)
+				continue
+			}
+			
+			// Find the JIRA ID for the child issue
+			childJiraID, found := findJiraIDFromLabels(childLabels)
+			if !found {
+				logging.Warn("child issue has no JIRA ID, skipping link",
+					"repository", childRepo,
+					"issue_number", childIssueNum)
+				continue
+			}
+			
+			// Create the parent-child link in JIRA
+			err = jiraClient.CreateParentChildLink(parentJiraID, childJiraID)
+			if err != nil {
+				logging.Error("failed to create parent-child link in JIRA",
+					"parent", parentJiraID,
+					"child", childJiraID,
+					"error", err)
+				continue
+			}
+			
+			logging.Info("created parent-child link in JIRA",
+				"parent", parentJiraID,
+				"child", childJiraID)
+			linkCount++
+		}
+	}
+	
+	return linkCount, nil
+}
+
+// parseChildIssues extracts GitHub issue links from the "## Issues" section
+// of a GitHub issue description.
+func parseChildIssues(description string) []string {
+	var childLinks []string
+	
+	// Find the "## Issues" section
+	issuesSection := findIssuesSection(description)
+	if issuesSection == "" {
+		return childLinks
+	}
+	
+	// Extract GitHub issue links using regex
+	re := regexp.MustCompile(`https://github\.com/[^/]+/[^/]+/issues/\d+`)
+	matches := re.FindAllString(issuesSection, -1)
+	
+	return matches
+}
+
+// findIssuesSection extracts the content of the "## Issues" section from a description
+func findIssuesSection(description string) string {
+	// Split the description by "## Issues" and take the content after it
+	parts := strings.Split(description, "## Issues")
+	if len(parts) < 2 {
+		return ""
+	}
+	
+	// Find the next section header or return the rest of the content
+	nextSectionIdx := strings.Index(parts[1], "## ")
+	if nextSectionIdx != -1 {
+		return parts[1][:nextSectionIdx]
+	}
+	
+	return parts[1]
+}
+
+// parseGitHubIssueLink extracts repository and issue number from a GitHub URL
+func parseGitHubIssueLink(link string) (string, int, error) {
+	re := regexp.MustCompile(`https://github\.com/([^/]+/[^/]+)/issues/(\d+)`)
+	matches := re.FindStringSubmatch(link)
+	
+	if len(matches) != 3 {
+		return "", 0, fmt.Errorf("invalid GitHub issue link format: %s", link)
+	}
+	
+	repo := matches[1]
+	issueNum, err := strconv.Atoi(matches[2])
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to parse issue number: %v", err)
+	}
+	
+	return repo, issueNum, nil
+}
+
+// findJiraIDFromLabels looks for a "jira-id:" label and extracts the JIRA ticket ID
+func findJiraIDFromLabels(labels []string) (string, bool) {
+	jiraIDPattern := regexp.MustCompile(`^jira-id: ([A-Z]+-\d+)$`)
+	
+	for _, label := range labels {
+		matches := jiraIDPattern.FindStringSubmatch(label)
+		if len(matches) == 2 {
+			return matches[1], true
+		}
+	}
+	
+	return "", false
+}
+
+// createJiraTickets creates JIRA tickets for GitHub issues.
+func createJiraTickets(repository string, githubClient *github.Client, jiraClient *jira.Client) (int, error) {
 	// Get all GitHub issues
 	issues, err := githubClient.GetAllIssues(repository)
 	if err != nil {
@@ -234,14 +431,4 @@ func syncGitHubToJira(repository string) (int, error) {
 	}
 
 	return syncCount, nil
-}
-
-// hasLabel checks if a specific label is present in a slice of labels.
-func hasLabel(labels []string, targetLabel string) bool {
-	for _, label := range labels {
-		if strings.EqualFold(label, targetLabel) {
-			return true
-		}
-	}
-	return false
 }
