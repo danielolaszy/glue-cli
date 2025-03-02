@@ -16,12 +16,13 @@ type Config struct {
 
 // GitHubConfig holds GitHub specific configuration.
 type GitHubConfig struct {
-	Token string
+	BaseURL string
+	Token   string
 }
 
 // JiraConfig holds JIRA specific configuration.
 type JiraConfig struct {
-	URL      string
+	BaseURL  string
 	Username string
 	Token    string
 }
@@ -35,21 +36,28 @@ func LoadConfig() (*Config, error) {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	// Map specific environment variables
+	v.BindEnv("github.baseurl", "GITHUB_BASE_URL")
 	v.BindEnv("github.token", "GITHUB_TOKEN")
-	v.BindEnv("jira.url", "JIRA_URL")
+	v.BindEnv("jira.baseurl", "JIRA_URL")
 	v.BindEnv("jira.username", "JIRA_USERNAME")
 	v.BindEnv("jira.token", "JIRA_TOKEN")
 
 	// Create config structure
 	config := &Config{
 		GitHub: GitHubConfig{
-			Token: v.GetString("github.token"),
+			BaseURL: v.GetString("github.baseurl"),
+			Token:   v.GetString("github.token"),
 		},
 		Jira: JiraConfig{
-			URL:      v.GetString("jira.url"),
+			BaseURL:  v.GetString("jira.baseurl"),
 			Username: v.GetString("jira.username"),
 			Token:    v.GetString("jira.token"),
 		},
+	}
+
+	// Set default values if not provided
+	if config.GitHub.BaseURL == "" {
+		config.GitHub.BaseURL = "https://api.github.com"
 	}
 
 	// Validate configuration
@@ -77,7 +85,7 @@ func ValidateJiraConfig(config *Config) error {
 	var missingVars []string
 
 	// JIRA validation
-	if config.Jira.URL == "" {
+	if config.Jira.BaseURL == "" {
 		missingVars = append(missingVars, "JIRA_URL")
 	}
 	if config.Jira.Username == "" {

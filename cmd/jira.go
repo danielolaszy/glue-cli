@@ -76,7 +76,7 @@ func init() {
 //   - The number of issues successfully synchronized
 //   - An error if the synchronization process failed
 func syncGitHubToJira(repository, jiraProjectKey string) (int, error) {
-	logging.Info("starting synchronization", 
+	logging.Info("starting github to jira synchronization", 
 		"repository", repository, 
 		"jira_project", jiraProjectKey)
 	
@@ -85,9 +85,24 @@ func syncGitHubToJira(repository, jiraProjectKey string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to initialize github client: %w", err)
 	}
+	
 	jiraClient, err := jira.NewClient()
 	if err != nil {
 		return 0, fmt.Errorf("failed to initialize jira client: %w", err)
+	}
+
+	// Get issue type IDs for required types
+	featureTypeID, err := jiraClient.GetIssueTypeID(jiraProjectKey, "feature")
+	if err != nil {
+		return 0, fmt.Errorf("cannot synchronize: %w", err)
+	}
+	
+	storyTypeID, err := jiraClient.GetIssueTypeID(jiraProjectKey, "story")
+	if err != nil {
+		// This is optional - if not found, we'll use "feature" type for stories too
+		logging.Warn("story issue type not found, will use feature type for all issues", 
+			"project", jiraProjectKey)
+		storyTypeID = featureTypeID
 	}
 
 	// Get all GitHub issues
@@ -136,16 +151,18 @@ func syncGitHubToJira(repository, jiraProjectKey string) (int, error) {
 			continue
 		}
 
-		// Determine issue type based on existing labels
-		issueType := "Task" // Default type
-		for _, label := range labels {
-			if label == "type: feature" {
-				issueType = "Feature"
-				break
-			} else if label == "type: story" {
-				issueType = "Story"
-				break
-			}
+		// Use the type IDs when creating tickets
+		var issueTypeID string
+		if hasLabel(labels, "type: feature") {
+			logging.Debug("using feature type for issue", "issue_number", issue.Number)
+			issueTypeID = featureTypeID
+		} else if hasLabel(labels, "type: story") {
+			logging.Debug("using story type for issue", "issue_number", issue.Number)
+			issueTypeID = storyTypeID
+		} else {
+			// Default to story type
+			logging.Debug("using default type for issue", "issue_number", issue.Number, "type", storyTypeID)
+			issueTypeID = storyTypeID
 		}
 
 		// Create JIRA ticket
@@ -153,9 +170,9 @@ func syncGitHubToJira(repository, jiraProjectKey string) (int, error) {
 			"repository", repository,
 			"issue_number", issue.Number, 
 			"jira_project", jiraProjectKey,
-			"issue_type", issueType,
+			"issue_type", issueTypeID,
 		)
-		ticketID, err := jiraClient.CreateTicket(jiraProjectKey, issue, issueType)
+		ticketID, err := jiraClient.CreateTicketWithTypeID(jiraProjectKey, issue, issueTypeID)
 		if err != nil {
 			logging.Error("error creating jira ticket", 
 				"repository", repository,
@@ -189,4 +206,14 @@ func syncGitHubToJira(repository, jiraProjectKey string) (int, error) {
 	}
 
 	return syncCount, nil
+}
+
+// hasLabel checks if a specific label is present in a slice of labels.
+func hasLabel(labels []string, targetLabel string) bool {
+	for _, label := range labels {
+		if strings.EqualFold(label, targetLabel) {
+			return true
+		}
+	}
+	return false
 }

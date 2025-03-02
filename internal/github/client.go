@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"net/url"
 
 	"github.com/danielolaszy/glue/pkg/models"
 	"github.com/google/go-github/v41/github"
@@ -16,7 +17,7 @@ import (
 	"github.com/danielolaszy/glue/internal/logging"
 )
 
-// Client handles interactions with the GitHub API.
+// Client encapsulates the GitHub API client.
 type Client struct {
 	client *github.Client
 }
@@ -28,34 +29,68 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
+	// Validate GitHub configuration
 	token := config.GitHub.Token
 	if token == "" {
 		return nil, fmt.Errorf("github token not found in configuration")
 	}
 
-	// Debug output
-	logging.Info("github configuration", "token_length", len(token))
+	baseURL := config.GitHub.BaseURL
+	logging.Info("github configuration", 
+		"base_url", baseURL, 
+		"token_length", len(token))
 
-	// Create the client
+	// Create the oauth2 client
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: token},
 	)
 	tc := oauth2.NewClient(context.Background(), ts)
-	client := github.NewClient(tc)
+	
+	// Create GitHub client with custom base URL if provided
+	var client *github.Client
+	
+	if baseURL == "https://api.github.com" {
+		// Use default client for GitHub.com
+		client = github.NewClient(tc)
+	} else {
+		// For custom GitHub instances (e.g., GitHub Enterprise)
+		// Ensure baseURL ends with a slash
+		if !strings.HasSuffix(baseURL, "/") {
+			baseURL += "/"
+		}
+		
+		// Parse the URL
+		parsedURL, err := url.Parse(baseURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid github base url: %w", err)
+		}
+		
+		// Create client with custom endpoint
+		client = github.NewClient(tc)
+		client.BaseURL = parsedURL
+		
+		// For GitHub Enterprise, we need to set the upload URL as well
+		uploadURL, err := url.Parse(baseURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse upload url: %w", err)
+		}
+		client.UploadURL = uploadURL
+	}
 
 	// Test the token
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	user, _, err := client.Users.Get(ctx, "")
+	user, resp, err := client.Users.Get(ctx, "")
 	if err != nil {
-		logging.Error("failed to test github token", "error", err)
+		logging.Error("failed to test github token", 
+			"error", err, 
+			"status_code", resp.StatusCode)
 		return nil, fmt.Errorf("error testing github token: %w", err)
 	}
 
-	if user.Login != nil {
-		logging.Info("github authentication successful", "username", *user.Login)
-	}
+	logging.Info("github authentication successful", 
+		"username", *user.Login)
 
 	return &Client{client: client}, nil
 }
