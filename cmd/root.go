@@ -27,9 +27,6 @@ func init() {
 	// Add persistent flags that will be available to all commands
 	rootCmd.PersistentFlags().StringP("repository", "r", "", "GitHub repository name (e.g., 'username/repo')")
 
-	// Add the GitHub command
-	rootCmd.AddCommand(githubCmd)
-
 	// Add the JIRA command
 	rootCmd.AddCommand(jiraCmd)
 }
