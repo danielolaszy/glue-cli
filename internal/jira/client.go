@@ -23,7 +23,9 @@ type Client struct {
 	issueTypeCache map[string]map[string]string // projectKey -> typeName -> typeID
 }
 
-// NewClient creates a new JIRA API client instance.
+// NewClient creates a new JIRA API client instance using credentials from environment 
+// variables. It tests the connection by retrieving the current user. It returns a
+// configured client or an error if authentication fails.
 func NewClient() (*Client, error) {
 	// Get JIRA credentials from environment variables
 	jiraURL := os.Getenv("JIRA_URL")
@@ -87,16 +89,10 @@ func NewClient() (*Client, error) {
 	}, nil
 }
 
-// CreateTicket creates a new JIRA ticket from a GitHub issue.
-//
-// Parameters:
-//   - projectKey: The JIRA project key (e.g., "ABC" for tickets like "ABC-123")
-//   - issue: The GitHub issue to create a ticket for
-//   - issueType: The type of JIRA issue to create (e.g., "Story", "Feature", "Task")
-//
-// Returns:
-//   - The ID of the created JIRA ticket (e.g., "ABC-123")
-//   - An error if the ticket couldn't be created
+// CreateTicket creates a new JIRA ticket from a GitHub issue. It verifies the project
+// exists, determines the appropriate issue type, and creates the ticket with a formatted
+// description. It returns the ID of the created JIRA ticket (e.g., "ABC-123") or an
+// error if creation fails.
 func (c *Client) CreateTicket(projectKey string, issue models.GitHubIssue, issueType string) (string, error) {
 	if c.client == nil {
 		return "", fmt.Errorf("jira client not initialized")
@@ -196,14 +192,8 @@ func (c *Client) CreateTicket(projectKey string, issue models.GitHubIssue, issue
 	return newIssue.Key, nil
 }
 
-// GetTotalTickets returns the total number of tickets in a JIRA project.
-//
-// Parameters:
-//   - projectKey: The JIRA project key (e.g., "ABC" for tickets like "ABC-123")
-//
-// Returns:
-//   - The number of tickets in the project
-//   - An error if the count couldn't be retrieved
+// GetTotalTickets returns the total number of tickets in a JIRA project by executing
+// a JQL search. It returns the count or an error if the query fails.
 func (c *Client) GetTotalTickets(projectKey string) (int, error) {
 	if c.client == nil {
 		return 0, fmt.Errorf("jira client not initialized")
@@ -226,7 +216,8 @@ func (c *Client) GetTotalTickets(projectKey string) (int, error) {
 	return len(result), nil
 }
 
-// IssueTypeExists checks if an issue type exists in the JIRA project.
+// IssueTypeExists checks if an issue type exists in the JIRA project. It returns
+// whether the type exists, the type ID if found, and any error that occurred.
 func (c *Client) IssueTypeExists(projectKey, typeName string) (bool, string, error) {
 	if c.client == nil {
 		return false, "", fmt.Errorf("jira client not initialized")
@@ -259,7 +250,8 @@ func (c *Client) IssueTypeExists(projectKey, typeName string) (bool, string, err
 	return false, "", nil
 }
 
-// AddIssueType creates a new issue type in JIRA.
+// AddIssueType creates a new issue type in JIRA. It handles both standard and
+// subtask types. It returns the created issue type or an error if creation fails.
 func (c *Client) AddIssueType(typeName string, isSubTask bool) (*jira.IssueType, error) {
 	if c.client == nil {
 		return nil, fmt.Errorf("jira client not initialized")
@@ -330,7 +322,9 @@ func (c *Client) AddIssueType(typeName string, isSubTask bool) (*jira.IssueType,
 	return issueTypeResponse, nil
 }
 
-// CanCreateIssueTypes checks if the current user has permission to create issue types.
+// CanCreateIssueTypes checks if the current user has permission to create issue types
+// by attempting to access the project metadata. It returns whether the user likely has
+// permission and any error that occurred during checking.
 func (c *Client) CanCreateIssueTypes(projectKey string) (bool, error) {
 	if c.client == nil {
 		return false, fmt.Errorf("jira client not initialized")
@@ -361,8 +355,8 @@ func (c *Client) CanCreateIssueTypes(projectKey string) (bool, error) {
 	return false, nil
 }
 
-// EnsureIssueTypeExists checks if an issue type exists in the JIRA project,
-// and creates it if it doesn't exist.
+// EnsureIssueTypeExists checks if an issue type exists in the JIRA project and
+// creates it if it doesn't. It returns the type ID and any error that occurred.
 func (c *Client) EnsureIssueTypeExists(projectKey, typeName string) (string, error) {
 	if c.client == nil {
 		return "", fmt.Errorf("jira client not initialized")
@@ -384,16 +378,16 @@ func (c *Client) EnsureIssueTypeExists(projectKey, typeName string) (string, err
 	// Check if we have permission to create issue types
 	canCreate, err := c.CanCreateIssueTypes(projectKey)
 	if err != nil {
-		logging.Warn("failed to check permissions for creating issue types", 
+		logging.Debug("failed to check permissions for creating issue types", 
 			"project", projectKey, 
 			"error", err)
-		// Continue anyway, we'll try to create it
+		// Continue anyway, we might still be able to find the type
 	}
 
 	if !canCreate {
-		logging.Warn("user may not have permission to create issue types", 
+		logging.Debug("user may not have permission to create issue types", 
 			"project", projectKey)
-		// We'll try anyway, but warn the user
+		// Continue anyway, the type might already exist
 	}
 
 	// Create the issue type
@@ -407,7 +401,8 @@ func (c *Client) EnsureIssueTypeExists(projectKey, typeName string) (string, err
 }
 
 // GetIssueTypeID retrieves the ID of a specific issue type from a JIRA project.
-// If the issue type is not found, it returns an error.
+// It checks the cache first and loads issue types for the project if necessary.
+// It returns the type ID or an error if the type cannot be found.
 func (c *Client) GetIssueTypeID(projectKey, typeName string) (string, error) {
 	typeName = strings.ToLower(typeName)
 	logging.Debug("retrieving issue type id", "project", projectKey, "type", typeName)
@@ -438,6 +433,7 @@ func (c *Client) GetIssueTypeID(projectKey, typeName string) (string, error) {
 }
 
 // CreateTicketWithTypeID creates a new JIRA ticket with a specific issue type ID.
+// It returns the ID of the created ticket or an error if creation fails.
 func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIssue, issueTypeID string) (string, error) {
 	if c.client == nil {
 		return "", fmt.Errorf("jira client not initialized")
@@ -500,7 +496,8 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 	return newIssue.Key, nil
 }
 
-// Add a method to load all issue types for a project
+// LoadIssueTypes loads all issue types for a project into the cache to avoid
+// repeated API calls. It returns an error if loading fails.
 func (c *Client) LoadIssueTypes(projectKey string) error {
 	logging.Debug("loading all issue types for project", "project", projectKey)
 	
@@ -529,9 +526,8 @@ func (c *Client) LoadIssueTypes(projectKey string) error {
 	return nil
 }
 
-// CreateParentChildLink establishes a parent-child relationship between JIRA tickets.
-// parentKey is the key of the parent ticket (e.g., "PROJECT-123")
-// childKey is the key of the child ticket to link to the parent.
+// CreateParentChildLink establishes a relationship between JIRA tickets using
+// the "Relates" link type. It returns an error if the linking operation fails.
 func (c *Client) CreateParentChildLink(parentKey, childKey string) error {
 	logging.Info("creating parent-child relationship in JIRA", 
 		"parent", parentKey, 

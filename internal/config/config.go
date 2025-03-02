@@ -16,8 +16,8 @@ type Config struct {
 
 // GitHubConfig holds GitHub specific configuration.
 type GitHubConfig struct {
-	BaseURL string
-	Token   string
+	Domain string // Just the domain name (e.g., "github.com" or "git.example.com")
+	Token  string
 }
 
 // JiraConfig holds JIRA specific configuration.
@@ -36,7 +36,7 @@ func LoadConfig() (*Config, error) {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	// Map specific environment variables
-	v.BindEnv("github.baseurl", "GITHUB_BASE_URL")
+	v.BindEnv("github.domain", "GITHUB_DOMAIN")
 	v.BindEnv("github.token", "GITHUB_TOKEN")
 	v.BindEnv("jira.baseurl", "JIRA_URL")
 	v.BindEnv("jira.username", "JIRA_USERNAME")
@@ -45,8 +45,8 @@ func LoadConfig() (*Config, error) {
 	// Create config structure
 	config := &Config{
 		GitHub: GitHubConfig{
-			BaseURL: v.GetString("github.baseurl"),
-			Token:   v.GetString("github.token"),
+			Domain: v.GetString("github.domain"),
+			Token:  v.GetString("github.token"),
 		},
 		Jira: JiraConfig{
 			BaseURL:  v.GetString("jira.baseurl"),
@@ -56,8 +56,8 @@ func LoadConfig() (*Config, error) {
 	}
 
 	// Set default values if not provided
-	if config.GitHub.BaseURL == "" {
-		config.GitHub.BaseURL = "https://api.github.com"
+	if config.GitHub.Domain == "" {
+		config.GitHub.Domain = "github.com"
 	}
 
 	// Validate configuration

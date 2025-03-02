@@ -17,9 +17,9 @@ func main() {
 	if logLevel == "" {
 		logLevel = "info"
 	}
-	
+
 	logging.Info("starting glue cli", "version", "1.0.0", "log_level", logLevel)
-	
+
 	if err := cmd.Execute(); err != nil {
 		logging.Error("command execution failed", "error", err)
 		fmt.Fprintln(os.Stderr, err)

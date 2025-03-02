@@ -22,7 +22,9 @@ type Client struct {
 	client *github.Client
 }
 
-// NewClient creates a new GitHub API client.
+// NewClient creates a new GitHub API client using configuration from environment variables.
+// It initializes the client with the appropriate base URL, authenticates with the GitHub API,
+// and tests the connection. It returns the configured client or an error if initialization fails.
 func NewClient() (*Client, error) {
 	config, err := config.LoadConfig()
 	if err != nil {
@@ -35,9 +37,23 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("github token not found in configuration")
 	}
 
-	baseURL := config.GitHub.BaseURL
+	// Get domain from config, default to github.com
+	domain := config.GitHub.Domain
+	if domain == "" {
+		domain = "github.com"
+	}
+
+	// Construct API URL based on domain
+	var apiURL string
+	if domain == "github.com" {
+		apiURL = "https://api.github.com/"
+	} else {
+		apiURL = fmt.Sprintf("https://%s/api/v3/", domain)
+	}
+
 	logging.Info("github configuration", 
-		"base_url", baseURL, 
+		"domain", domain, 
+		"api_url", apiURL,
 		"token_length", len(token))
 
 	// Create the oauth2 client
@@ -46,35 +62,20 @@ func NewClient() (*Client, error) {
 	)
 	tc := oauth2.NewClient(context.Background(), ts)
 	
-	// Create GitHub client with custom base URL if provided
-	var client *github.Client
+	// Create GitHub client with custom base URL
+	client := github.NewClient(tc)
 	
-	if baseURL == "https://api.github.com" {
-		// Use default client for GitHub.com
-		client = github.NewClient(tc)
-	} else {
-		// For custom GitHub instances (e.g., GitHub Enterprise)
-		// Ensure baseURL ends with a slash
-		if !strings.HasSuffix(baseURL, "/") {
-			baseURL += "/"
-		}
-		
-		// Parse the URL
-		parsedURL, err := url.Parse(baseURL)
+	// If not using default GitHub.com, set custom API endpoint
+	if domain != "github.com" {
+		parsedURL, err := url.Parse(apiURL)
 		if err != nil {
-			return nil, fmt.Errorf("invalid github base url: %w", err)
+			return nil, fmt.Errorf("invalid github api url: %w", err)
 		}
 		
-		// Create client with custom endpoint
-		client = github.NewClient(tc)
 		client.BaseURL = parsedURL
 		
-		// For GitHub Enterprise, we need to set the upload URL as well
-		uploadURL, err := url.Parse(baseURL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse upload url: %w", err)
-		}
-		client.UploadURL = uploadURL
+		// For GitHub Enterprise, set the upload URL to the same endpoint
+		client.UploadURL = parsedURL
 	}
 
 	// Test the token
@@ -96,13 +97,9 @@ func NewClient() (*Client, error) {
 }
 
 // GetAllIssues retrieves all open issues from a GitHub repository.
-//
-// Parameters:
-//   - repository: The GitHub repository in the format "owner/repo"
-//
-// Returns:
-//   - A slice of GitHubIssue objects representing the open issues
-//   - An error if the issues couldn't be retrieved
+// It filters out pull requests and converts the GitHub API objects to our internal model.
+// The repository should be in the format "owner/repo". It returns a slice of issues
+// or an error if the retrieval fails.
 func (c *Client) GetAllIssues(repository string) ([]models.GitHubIssue, error) {
 	// Parse repository owner and name
 	parts := strings.Split(repository, "/")
@@ -169,15 +166,8 @@ func (c *Client) GetAllIssues(repository string) ([]models.GitHubIssue, error) {
 }
 
 // AddLabels adds one or more labels to a GitHub issue. If the labels don't exist
-// in the repository, they will be automatically created by GitHub.
-//
-// Parameters:
-//   - repository: The GitHub repository in the format "owner/repo"
-//   - issueNumber: The number of the issue to add labels to
-//   - labels: One or more label strings to add to the issue
-//
-// Returns:
-//   - An error if the labels couldn't be added
+// in the repository, GitHub will automatically create them. The repository should be
+// in the format "owner/repo". It returns an error if the operation fails.
 func (c *Client) AddLabels(repository string, issueNumber int, labels ...string) error {
 	// Parse repository owner and name
 	parts := strings.Split(repository, "/")
@@ -190,7 +180,7 @@ func (c *Client) AddLabels(repository string, issueNumber int, labels ...string)
 	ctx := context.Background()
 
 	// Log the operation
-	logging.Info("adding labels", "labels", labels, "issue_number", issueNumber)
+	logging.Debug("adding labels", "labels", labels, "issue_number", issueNumber)
 
 	// Add the labels to the issue
 	// GitHub will automatically create labels that don't exist
@@ -202,19 +192,13 @@ func (c *Client) AddLabels(repository string, issueNumber int, labels ...string)
 		return fmt.Errorf("failed to add labels to issue %s#%d: %v", repo, issueNumber, err)
 	}
 
-	logging.Info("successfully added labels", "labels", labels, "repository", repository, "issue_number", issueNumber)
+	logging.Debug("successfully added labels", "labels", labels, "repository", repository, "issue_number", issueNumber)
 	return nil
 }
 
-// GetLabelsForIssue retrieves all labels for a specific GitHub issue.
-//
-// Parameters:
-//   - repository: The GitHub repository in the format "owner/repo"
-//   - issueNumber: The number of the issue to get labels for
-//
-// Returns:
-//   - A slice of strings representing the label names
-//   - An error if the labels couldn't be retrieved
+// GetLabelsForIssue retrieves all labels for a specific GitHub issue and returns
+// them as string names. The repository should be in the format "owner/repo".
+// It returns a slice of label names or an error if the retrieval fails.
 func (c *Client) GetLabelsForIssue(repository string, issueNumber int) ([]string, error) {
 	// Parse repository owner and name
 	parts := strings.Split(repository, "/")
@@ -227,7 +211,7 @@ func (c *Client) GetLabelsForIssue(repository string, issueNumber int) ([]string
 	ctx := context.Background()
 
 	// Log the operation
-	logging.Info("retrieving labels", "repository", repository, "issue_number", issueNumber)
+	logging.Debug("retrieving labels", "repository", repository, "issue_number", issueNumber)
 
 	// Get the labels for the issue
 	// The GitHub API returns an array of label objects
@@ -246,20 +230,13 @@ func (c *Client) GetLabelsForIssue(repository string, issueNumber int) ([]string
 		labelNames[i] = label.GetName()
 	}
 
-	logging.Info("successfully retrieved labels", "repository", repository, "issue_number", issueNumber, "number_of_labels", len(labelNames))
+	logging.Debug("successfully retrieved labels", "repository", repository, "issue_number", issueNumber, "number_of_labels", len(labelNames))
 	return labelNames, nil
 }
 
-// HasLabel checks if a GitHub issue has a specific label.
-//
-// Parameters:
-//   - repository: The GitHub repository in the format "owner/repo"
-//   - issueNumber: The number of the issue to check
-//   - labelName: The exact name of the label to check for
-//
-// Returns:
-//   - true if the issue has the label, false otherwise
-//   - An error if there was a problem checking the labels
+// HasLabel checks if a GitHub issue has a specific label using exact matching.
+// The repository should be in the format "owner/repo". It returns true if the
+// label is found, false otherwise, and any error encountered during checking.
 func (c *Client) HasLabel(repository string, issueNumber int, labelName string) (bool, error) {
 	// Get all labels for the issue
 	labels, err := c.GetLabelsForIssue(repository, issueNumber)
@@ -277,16 +254,9 @@ func (c *Client) HasLabel(repository string, issueNumber int, labelName string) 
 	return false, nil
 }
 
-// HasLabelMatching checks if a GitHub issue has any label matching the given pattern.
-//
-// Parameters:
-//   - repository: The GitHub repository in the format "owner/repo"
-//   - issueNumber: The number of the issue to check
-//   - pattern: A compiled regular expression pattern to match against label names
-//
-// Returns:
-//   - true if any label matches the pattern, false otherwise
-//   - An error if there was a problem checking the labels
+// HasLabelMatching checks if a GitHub issue has any label matching a regular expression pattern.
+// The repository should be in the format "owner/repo". It returns true if any label
+// matches the pattern, false otherwise, and any error encountered during checking.
 func (c *Client) HasLabelMatching(repository string, issueNumber int, pattern *regexp.Regexp) (bool, error) {
 	// Get all labels for the issue
 	labels, err := c.GetLabelsForIssue(repository, issueNumber)
