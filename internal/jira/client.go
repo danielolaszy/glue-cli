@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	jira "github.com/andygrunwald/go-jira"
 	"github.com/danielolaszy/glue/internal/logging"
@@ -676,8 +677,12 @@ func (c *Client) GetProjectVersions(projectKey string) ([]jira.Version, error) {
 	return project.Versions, nil
 }
 
-// GetDefaultFixVersion returns the latest unreleased version for a project.
-// If no unreleased version exists, it returns nil.
+// GetDefaultFixVersion returns the most appropriate unreleased version for a project.
+// It selects a version that is:
+// 1. Not released
+// 2. Not archived
+// 3. Has a start date closest to today (if available)
+// 4. Falls back to the most recently created unreleased version if no start dates
 func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, error) {
 	logging.Debug("getting default fix version", "project", projectKey)
 
@@ -689,87 +694,84 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 
 	logging.Debug("found project versions", "count", len(versions))
 
-	// Look for the latest unreleased version
-	var latestVersion *jira.Version
+	// Get today's date in YYYY-MM-DD format
+	today := time.Now().Format("2006-01-02")
+	logging.Debug("using reference date", "date", today)
+
+	var bestVersion *jira.Version
+	var smallestDateDiff string
+
+	// First pass: Look for versions with start dates
 	for i := range versions {
 		version := &versions[i]
 
-		// Log version details
-		released := false
-		if version.Released != nil {
-			released = *version.Released
-		}
-		logging.Debug("checking version",
-			"name", version.Name,
-			"id", version.ID,
-			"released", released,
-			"start_date", version.StartDate)
-
-		if version.Released != nil && *version.Released {
-			logging.Debug("skipping released version", "name", version.Name)
+		// Skip released or archived versions
+		released := version.Released != nil && *version.Released
+		archived := version.Archived != nil && *version.Archived
+		if released || archived {
+			logging.Debug("skipping released/archived version",
+				"name", version.Name,
+				"released", released,
+				"archived", archived)
 			continue
 		}
 
-		// If current version has no start date, skip comparison
+		// Skip versions without start dates in first pass
 		if version.StartDate == "" {
-			logging.Debug("skipping version with no start date", "name", version.Name)
 			continue
 		}
 
-		// If we have no latest version yet, or this version is newer
-		if latestVersion == nil || version.StartDate > latestVersion.StartDate {
-			logging.Debug("found newer version",
+		// Calculate difference between version start date and today
+		if bestVersion == nil || (version.StartDate <= today && version.StartDate > bestVersion.StartDate) {
+			logging.Debug("found better version by date",
 				"name", version.Name,
 				"start_date", version.StartDate,
-				"previous_version", latestVersion.Name)
-			latestVersion = version
+				"previous_version", bestVersion.Name)
+			bestVersion = version
+			smallestDateDiff = version.StartDate
 		}
 	}
 
-	// If we didn't find a version with a start date, use the first unreleased version
-	if latestVersion == nil {
-		logging.Debug("no version with start date found, looking for any unreleased version")
+	// If we didn't find a version with a suitable start date, use the first unreleased, non-archived version
+	if bestVersion == nil {
+		logging.Debug("no version with suitable start date found, looking for any unreleased version")
 		for i := range versions {
 			version := &versions[i]
-			released := false
-			if version.Released != nil {
-				released = *version.Released
-			}
-			logging.Debug("checking version for release status",
-				"name", version.Name,
-				"released", released)
+			released := version.Released != nil && *version.Released
+			archived := version.Archived != nil && *version.Archived
 
-			if version.Released == nil || !*version.Released {
-				logging.Debug("found unreleased version", "name", version.Name)
-				latestVersion = version
+			if !released && !archived {
+				logging.Debug("found unreleased and non-archived version", "name", version.Name)
+				bestVersion = version
 				break
 			}
 		}
 	}
 
 	// Convert Version to FixVersion
-	if latestVersion != nil {
+	if bestVersion != nil {
 		released := false
-		if latestVersion.Released != nil {
-			released = *latestVersion.Released
+		if bestVersion.Released != nil {
+			released = *bestVersion.Released
 		}
 		archived := false
-		if latestVersion.Archived != nil {
-			archived = *latestVersion.Archived
+		if bestVersion.Archived != nil {
+			archived = *bestVersion.Archived
 		}
 		releasedPtr := &released
 		archivedPtr := &archived
 
 		logging.Info("selected fix version",
-			"name", latestVersion.Name,
-			"id", latestVersion.ID,
+			"name", bestVersion.Name,
+			"id", bestVersion.ID,
+			"start_date", bestVersion.StartDate,
 			"released", released,
 			"archived", archived)
 
 		return &jira.FixVersion{
-			ID:          latestVersion.ID,
-			Name:        latestVersion.Name,
-			Description: latestVersion.Description,
+			ID:          bestVersion.ID,
+			Name:        bestVersion.Name,
+			Description: bestVersion.Description,
 			Released:    releasedPtr,
 			Archived:    archivedPtr,
 		}, nil
