@@ -8,12 +8,11 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"net/url"
+	"os"
 
 	"github.com/danielolaszy/glue/pkg/models"
 	"github.com/google/go-github/v41/github"
 	"golang.org/x/oauth2"
-	"github.com/danielolaszy/glue/internal/config"
 	"github.com/danielolaszy/glue/internal/logging"
 )
 
@@ -22,78 +21,68 @@ type Client struct {
 	client *github.Client
 }
 
-// NewClient creates a new GitHub API client using configuration from environment variables.
-// It initializes the client with the appropriate base URL, authenticates with the GitHub API,
-// and tests the connection. It returns the configured client or an error if initialization fails.
+// NewClient creates a new GitHub client with retries and longer timeout
 func NewClient() (*Client, error) {
-	config, err := config.LoadConfig()
-	if err != nil {
-		return nil, fmt.Errorf("failed to load configuration: %w", err)
-	}
-
-	// Validate GitHub configuration
-	token := config.GitHub.Token
+	// Get GitHub configuration
+	token := os.Getenv("GITHUB_TOKEN")
 	if token == "" {
-		return nil, fmt.Errorf("github token not found in configuration")
+		return nil, fmt.Errorf("GITHUB_TOKEN environment variable is required")
 	}
 
-	// Get domain from config, default to github.com
-	domain := config.GitHub.Domain
-	if domain == "" {
-		domain = "github.com"
-	}
+	logging.Debug("initializing github client", 
+		"token_length", len(token),
+		"token_prefix", token[:5]+"...") // Only log first 5 chars for security
 
-	// Construct API URL based on domain
-	var apiURL string
-	if domain == "github.com" {
-		apiURL = "https://api.github.com/"
-	} else {
-		apiURL = fmt.Sprintf("https://%s/api/v3/", domain)
-	}
-
-	logging.Info("github configuration", 
-		"domain", domain, 
-		"api_url", apiURL,
-		"token_length", len(token))
-
-	// Create the oauth2 client
+	// Create GitHub client with OAuth2 transport
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: token},
 	)
-	tc := oauth2.NewClient(context.Background(), ts)
-	
-	// Create GitHub client with custom base URL
+	ctx := context.Background()
+	tc := oauth2.NewClient(ctx, ts)
+	tc.Timeout = 30 * time.Second
+
 	client := github.NewClient(tc)
-	
-	// If not using default GitHub.com, set custom API endpoint
-	if domain != "github.com" {
-		parsedURL, err := url.Parse(apiURL)
-		if err != nil {
-			return nil, fmt.Errorf("invalid github api url: %w", err)
+
+	// Test the connection with retries
+	for i := 0; i < 3; i++ { // Try up to 3 times
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		logging.Debug("testing github authentication", "attempt", i+1)
+		user, resp, err := client.Users.Get(ctx, "")
+		
+		if err == nil && user != nil {
+			logging.Info("github authentication successful",
+				"username", *user.Login)
+			return &Client{
+				client: client,
+			}, nil
 		}
+
+		// Log detailed error information
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		logging.Error("github authentication failed",
+			"attempt", i+1,
+			"status_code", statusCode,
+			"error", err)
+
+		if resp != nil && (resp.StatusCode == 403 || resp.StatusCode == 401) {
+			// Don't retry auth errors
+			return nil, fmt.Errorf("error testing github token: %v (status: %d)", err, resp.StatusCode)
+		}
+
+		logging.Warn("github authentication attempt failed, retrying...",
+			"attempt", i+1,
+			"error", err)
 		
-		client.BaseURL = parsedURL
-		
-		// For GitHub Enterprise, set the upload URL to the same endpoint
-		client.UploadURL = parsedURL
+		// Wait before retrying
+		time.Sleep(time.Second * time.Duration(i+1))
 	}
 
-	// Test the token
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	user, resp, err := client.Users.Get(ctx, "")
-	if err != nil {
-		logging.Error("failed to test github token", 
-			"error", err, 
-			"status_code", resp.StatusCode)
-		return nil, fmt.Errorf("error testing github token: %w", err)
-	}
-
-	logging.Info("github authentication successful", 
-		"username", *user.Login)
-
-	return &Client{client: client}, nil
+	return nil, fmt.Errorf("error testing github token after retries: context deadline exceeded")
 }
 
 // GetAllIssues retrieves all open issues from a GitHub repository.

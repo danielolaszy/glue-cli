@@ -25,12 +25,11 @@ go build -o glue
 
 ### Environment variables
 
-The following environment variables need to be set:
+The following environment variables are required:
 
 ```bash
-# GitHub
+# For GitHub integration
 export GITHUB_TOKEN=your_github_token
-export GITHUB_DOMAIN=github.example.com # Optional: Defaults to github.com if not specified
 
 # For JIRA integration
 export JIRA_URL=https://your-domain.atlassian.net

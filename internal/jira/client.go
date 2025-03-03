@@ -3,7 +3,6 @@ package jira
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -53,9 +52,10 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("missing required environment variables: %v", missingVars)
 	}
 
-	// Create transport for authentication
-	tp := jira.BearerAuthTransport{
-		Token: jiraToken,
+	// Create transport for basic auth
+	tp := jira.BasicAuthTransport{
+		Username: jiraUsername,
+		Password: jiraToken,
 	}
 
 	// Create JIRA client
@@ -65,22 +65,21 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("error creating jira client: %v", err)
 	}
 
-	// Verify client is properly initialized
-	if client == nil {
-		return nil, fmt.Errorf("jira client is nil after initialization")
-	}
-
-	if client.Issue == nil {
-		return nil, fmt.Errorf("jira client Issue service is nil")
-	}
-
-	// Test the connection by getting the current user
+	// Test the connection
 	myself, resp, err := client.User.GetSelf()
 	if err != nil {
-		logging.Error("failed to test jira connection", "error", err, "status_code", resp.StatusCode)
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		logging.Error("failed to test jira connection", 
+			"error", err,
+			"status_code", statusCode)
 		return nil, fmt.Errorf("error testing jira connection: %v", err)
 	}
-	logging.Info("jira authentication successful", "username", myself.EmailAddress)
+
+	logging.Info("jira authentication successful", 
+		"username", myself.DisplayName)
 
 	return &Client{
 		client:         client,
@@ -226,8 +225,7 @@ func (c *Client) getCustomField(name string) (string, string, error) {
 	return "", "", fmt.Errorf("custom field '%s' not found", name)
 }
 
-// CreateTicketWithTypeID creates a new JIRA ticket with a specific issue type ID.
-// It returns the ID of the created ticket or an error if creation fails.
+// CreateTicketWithTypeID creates a new JIRA ticket with the specified type ID.
 func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIssue, issueTypeID string) (string, error) {
 	if c.client == nil {
 		return "", fmt.Errorf("jira client not initialized")
@@ -245,6 +243,7 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 		"title", issue.Title,
 		"type_id", issueTypeID)
 
+	// Create the basic issue fields
 	issueFields := &jira.IssueFields{
 		Project: jira.Project{
 			Key: projectKey,
@@ -252,7 +251,7 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 		Summary:     issue.Title,
 		Description: issue.Description,
 		Type: jira.IssueType{
-			ID: issueTypeID, // Use issue type ID
+			ID: issueTypeID,
 		},
 	}
 
@@ -260,93 +259,41 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 	if fixVersion != nil {
 		issueFields.FixVersions = []*jira.FixVersion{fixVersion}
 		logging.Info("adding fix version to ticket",
-			"version_name", fixVersion.Name,
+			"version", fixVersion,
 			"version_id", fixVersion.ID)
 	}
 
-	// Check if this is a feature type and add required custom fields
-	featureTypeID, err := c.GetIssueTypeID(projectKey, "Feature")
-	if err == nil && featureTypeID == issueTypeID {
-		logging.Debug("adding custom fields for feature type")
-
-		// Get Feature Name field ID
-		featureNameFieldID, featureNameType, err := c.getCustomField("Feature Name")
-		if err != nil {
-			logging.Error("failed to get Feature Name field ID", "error", err)
-			return "", fmt.Errorf("failed to get Feature Name field ID: %v", err)
+	// Try to get Feature Name field ID, but don't error if not found
+	featureNameField, fieldType, err := c.getCustomField("Feature Name")
+	if err != nil {
+		logging.Debug("Feature Name field not found, continuing without it", 
+			"error", err)
+	} else {
+		// Only add Feature Name field if we found the field ID
+		issueFields.Unknowns = map[string]interface{}{
+			featureNameField: issue.Title,
 		}
-
-		// Get Primary Feature Work Type field ID
-		workTypeFieldID, workTypeFieldType, err := c.getCustomField("Primary Feature Work Type ")
-		if err != nil {
-			logging.Error("failed to get Primary Feature Work Type field ID", "error", err)
-			return "", fmt.Errorf("failed to get Primary Feature Work Type field ID: %v", err)
-		}
-
-		// Initialize Unknowns map if it doesn't exist
-		if issueFields.Unknowns == nil {
-			issueFields.Unknowns = make(map[string]interface{})
-		}
-
-		// Add custom fields to the request with proper formatting based on field type
-		customFields := make(map[string]interface{})
-
-		// Feature Name is likely a text field, so we can use the value directly
-		customFields[featureNameFieldID] = issue.Title
-
-		// Primary Feature Work Type is a select/option field
-		const workTypeValue = "Other Non-Application Development activities"
-		customFields[workTypeFieldID] = map[string]interface{}{
-			"value": workTypeValue,
-		}
-
-		// Add custom fields to issue fields
-		for id, value := range customFields {
-			issueFields.Unknowns[id] = value
-		}
-
-		logging.Debug("added custom fields",
-			"feature_name_id", featureNameFieldID,
-			"feature_name_type", featureNameType,
-			"work_type_id", workTypeFieldID,
-			"work_type_type", workTypeFieldType)
+		logging.Debug("adding Feature Name field", 
+			"field_id", featureNameField,
+			"field_type", fieldType,
+			"value", issue.Title)
 	}
 
 	// Create the issue
-	jiraIssue := &jira.Issue{
+	newIssue := &jira.Issue{
 		Fields: issueFields,
 	}
 
-	logging.Debug("sending request to jira api")
-
-	newIssue, resp, err := c.client.Issue.Create(jiraIssue)
+	createdIssue, resp, err := c.client.Issue.Create(newIssue)
 	if err != nil {
-		statusCode := 0
-		if resp != nil {
-			statusCode = resp.StatusCode
-
-			// Try to get more details about the error
-			body, readErr := io.ReadAll(resp.Body)
-			if readErr == nil {
-				logging.Error("failed to create jira ticket",
-					"error", err,
-					"status_code", statusCode,
-					"response", string(body))
-				return "", fmt.Errorf("failed to create jira ticket: %v (status: %d, response: %s)",
-					err, statusCode, string(body))
-			}
-		}
-		logging.Error("failed to create jira ticket", "error", err, "status_code", statusCode)
-		return "", fmt.Errorf("failed to create jira ticket: %v (status: %d)", err, statusCode)
+		logging.Error("failed to create jira ticket",
+			"error", err,
+			"status_code", resp.StatusCode)
+		return "", fmt.Errorf("failed to create jira ticket: %v", err)
 	}
 
-	if newIssue == nil {
-		logging.Error("jira api returned nil issue")
-		return "", fmt.Errorf("jira api returned nil issue")
-	}
-
-	logging.Info("created jira ticket", "key", newIssue.Key)
-	return newIssue.Key, nil
+	logging.Info("created jira ticket", "key", createdIssue.Key)
+	return createdIssue.Key, nil
 }
 
 // LoadIssueTypes loads all issue types for a project into the cache to avoid
