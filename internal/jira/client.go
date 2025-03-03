@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	jira "github.com/andygrunwald/go-jira"
 	"github.com/danielolaszy/glue/internal/logging"
@@ -677,12 +676,10 @@ func (c *Client) GetProjectVersions(projectKey string) ([]jira.Version, error) {
 	return project.Versions, nil
 }
 
-// GetDefaultFixVersion returns the most appropriate unreleased version for a project.
+// GetDefaultFixVersion returns the most recently created unreleased version for a project.
 // It selects a version that is:
 // 1. Not released
 // 2. Not archived
-// 3. Has a start date closest to today (if available)
-// 4. Falls back to the most recently created unreleased version if no start dates
 func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, error) {
 	logging.Debug("getting default fix version", "project", projectKey)
 
@@ -694,14 +691,8 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 
 	logging.Debug("found project versions", "count", len(versions))
 
-	// Get today's date in YYYY-MM-DD format
-	today := time.Now().Format("2006-01-02")
-	logging.Debug("using reference date", "date", today)
-
+	// Find the most recently created unreleased version
 	var bestVersion *jira.Version
-	var smallestDateDiff string
-
-	// First pass: Look for versions with start dates
 	for i := range versions {
 		version := &versions[i]
 
@@ -716,35 +707,20 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 			continue
 		}
 
-		// Skip versions without start dates in first pass
-		if version.StartDate == "" {
+		// If we haven't found a version yet, or this one is more recent
+		if bestVersion == nil {
+			bestVersion = version
+			logging.Debug("found first unreleased version", "name", version.Name)
 			continue
 		}
 
-		// Calculate difference between version start date and today
-		if bestVersion == nil || (version.StartDate <= today && version.StartDate > bestVersion.StartDate) {
-			logging.Debug("found better version by date",
+		// Compare sequence IDs if available (higher is more recent)
+		if version.ID > bestVersion.ID {
+			logging.Debug("found more recent version",
 				"name", version.Name,
-				"start_date", version.StartDate,
+				"id", version.ID,
 				"previous_version", bestVersion.Name)
 			bestVersion = version
-			smallestDateDiff = version.StartDate
-		}
-	}
-
-	// If we didn't find a version with a suitable start date, use the first unreleased, non-archived version
-	if bestVersion == nil {
-		logging.Debug("no version with suitable start date found, looking for any unreleased version")
-		for i := range versions {
-			version := &versions[i]
-			released := version.Released != nil && *version.Released
-			archived := version.Archived != nil && *version.Archived
-
-			if !released && !archived {
-				logging.Debug("found unreleased and non-archived version", "name", version.Name)
-				bestVersion = version
-				break
-			}
 		}
 	}
 
@@ -764,7 +740,6 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 		logging.Info("selected fix version",
 			"name", bestVersion.Name,
 			"id", bestVersion.ID,
-			"start_date", bestVersion.StartDate,
 			"released", released,
 			"archived", archived)
 
