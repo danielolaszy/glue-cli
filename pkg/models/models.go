@@ -1,7 +1,11 @@
 // Package models defines data structures shared across the application.
 package models
 
-// GitHubIssue represents a GitHub issue with its key properties.
+import (
+	"time"
+)
+
+// GitHubIssue represents a GitHub issue with its essential fields
 type GitHubIssue struct {
 	// Number is the issue number in GitHub (e.g., 42)
 	Number int
@@ -11,6 +15,18 @@ type GitHubIssue struct {
 
 	// Description is the full body text of the issue
 	Description string
+
+	// State is the current state of the issue
+	State string
+
+	// CreatedAt is the timestamp when the issue was created
+	CreatedAt time.Time
+
+	// UpdatedAt is the timestamp when the issue was last updated
+	UpdatedAt time.Time
+
+	// ClosedAt is the timestamp when the issue was closed
+	ClosedAt *time.Time
 
 	// Labels is a slice of label names attached to the issue
 	Labels []string

@@ -360,3 +360,98 @@ func (c *Client) GetClosedIssues(repository string) ([]models.GitHubIssue, error
 
 	return result, nil
 }
+
+// GetIssuesWithLabel retrieves all open issues that have a specific label
+func (c *Client) GetIssuesWithLabel(repository, label string) ([]models.GitHubIssue, error) {
+	logging.Debug("fetching github issues with label",
+		"repository", repository,
+		"label", label)
+
+	query := fmt.Sprintf("repo:%s is:issue is:open label:%s", repository, label)
+	opts := &github.SearchOptions{
+		ListOptions: github.ListOptions{
+			PerPage: 100,
+		},
+	}
+
+	var allIssues []models.GitHubIssue
+	for {
+		result, resp, err := c.client.Search.Issues(context.Background(), query, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to search issues: %v", err)
+		}
+
+		for _, issue := range result.Issues {
+			labels := make([]string, 0, len(issue.Labels))
+			for _, label := range issue.Labels {
+				if label.Name != nil {
+					labels = append(labels, *label.Name)
+				}
+			}
+
+			allIssues = append(allIssues, models.GitHubIssue{
+				Number:      *issue.Number,
+				Title:       *issue.Title,
+				Description: *issue.Body,
+				State:       *issue.State,
+				CreatedAt:   *issue.CreatedAt,
+				UpdatedAt:   *issue.UpdatedAt,
+				ClosedAt:    issue.ClosedAt,
+				Labels:      labels,
+			})
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	return allIssues, nil
+}
+
+// UpdateIssueTitle updates the title of a GitHub issue
+func (c *Client) UpdateIssueTitle(repository string, issueNumber int, newTitle string) error {
+	parts := strings.Split(repository, "/")
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid repository format: %s", repository)
+	}
+
+	issue := &github.IssueRequest{
+		Title: &newTitle,
+	}
+
+	_, _, err := c.client.Issues.Edit(context.Background(), parts[0], parts[1], issueNumber, issue)
+	if err != nil {
+		return fmt.Errorf("failed to update issue title: %v", err)
+	}
+
+	return nil
+}
+
+// GetIssue retrieves a specific GitHub issue by number
+func (c *Client) GetIssue(repository string, issueNumber int) (models.GitHubIssue, error) {
+	parts := strings.Split(repository, "/")
+	if len(parts) != 2 {
+		return models.GitHubIssue{}, fmt.Errorf("invalid repository format: %s", repository)
+	}
+
+	issue, _, err := c.client.Issues.Get(context.Background(), parts[0], parts[1], issueNumber)
+	if err != nil {
+		return models.GitHubIssue{}, fmt.Errorf("failed to get issue: %v", err)
+	}
+
+	labels := make([]string, 0, len(issue.Labels))
+	for _, label := range issue.Labels {
+		if label.Name != nil {
+			labels = append(labels, *label.Name)
+		}
+	}
+
+	return models.GitHubIssue{
+		Number:      *issue.Number,
+		Title:       *issue.Title,
+		Description: *issue.Body,
+		Labels:      labels,
+	}, nil
+}
