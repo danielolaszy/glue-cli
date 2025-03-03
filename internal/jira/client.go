@@ -179,6 +179,48 @@ func (c *Client) GetIssueTypeID(projectKey, typeName string) (string, error) {
 	return "", fmt.Errorf("issue type '%s' not found in project '%s'", typeName, projectKey)
 }
 
+// getCustomField retrieves the custom field ID by its name.
+// It returns the field ID or an error if the field cannot be found.
+func (c *Client) getCustomField(name string) (string, error) {
+	if c.client == nil {
+		return "", fmt.Errorf("jira client not initialized")
+	}
+
+	logging.Debug("getting custom field ID", "name", name)
+
+	// Get all fields
+	req, err := c.client.NewRequest("GET", "rest/api/2/field", nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request for getting fields: %v", err)
+	}
+
+	var fields []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+
+	resp, err := c.client.Do(req, &fields)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		return "", fmt.Errorf("failed to get fields: %v (status: %d)", err, statusCode)
+	}
+
+	// Find the field with matching name
+	for _, field := range fields {
+		if field.Name == name {
+			logging.Debug("found custom field",
+				"name", name,
+				"id", field.ID)
+			return field.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("custom field '%s' not found", name)
+}
+
 // CreateTicketWithTypeID creates a new JIRA ticket with a specific issue type ID.
 // It returns the ID of the created ticket or an error if creation fails.
 func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIssue, issueTypeID string) (string, error) {
@@ -193,9 +235,6 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 		// Continue without fix version
 	}
 
-	// Prepare issue fields
-	description := fmt.Sprint("\n\n----\nCreated by glue-cli")
-
 	logging.Info("creating jira ticket",
 		"project", projectKey,
 		"title", issue.Title,
@@ -206,7 +245,7 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 			Key: projectKey,
 		},
 		Summary:     issue.Title,
-		Description: description,
+		Description: issue.Description,
 		Type: jira.IssueType{
 			ID: issueTypeID, // Use issue type ID
 		},
@@ -218,6 +257,46 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 		logging.Info("adding fix version to ticket",
 			"version_name", fixVersion.Name,
 			"version_id", fixVersion.ID)
+	}
+
+	// Check if this is a feature type and add required custom fields
+	featureTypeID, err := c.GetIssueTypeID(projectKey, "Feature")
+	if err == nil && featureTypeID == issueTypeID {
+		logging.Debug("adding custom fields for feature type")
+
+		// Get Feature Name field ID
+		featureNameFieldID, err := c.getCustomField("Feature Name")
+		if err != nil {
+			logging.Error("failed to get Feature Name field ID", "error", err)
+			return "", fmt.Errorf("failed to get Feature Name field ID: %v", err)
+		}
+
+		// Get Primary Feature Work Type field ID
+		workTypeFieldID, err := c.getCustomField("Primary Feature Work Type")
+		if err != nil {
+			logging.Error("failed to get Primary Feature Work Type field ID", "error", err)
+			return "", fmt.Errorf("failed to get Primary Feature Work Type field ID: %v", err)
+		}
+
+		// Initialize Unknowns map if it doesn't exist
+		if issueFields.Unknowns == nil {
+			issueFields.Unknowns = make(map[string]interface{})
+		}
+
+		// Add custom fields to the request
+		customFields := map[string]interface{}{
+			featureNameFieldID: issue.Title,
+			workTypeFieldID:    "New Feature", // You might want to make this configurable
+		}
+
+		// Add custom fields to issue fields
+		for id, value := range customFields {
+			issueFields.Unknowns[id] = value
+		}
+
+		logging.Debug("added custom fields",
+			"feature_name_id", featureNameFieldID,
+			"work_type_id", workTypeFieldID)
 	}
 
 	// Create the issue
