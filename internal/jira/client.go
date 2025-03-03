@@ -676,10 +676,11 @@ func (c *Client) GetProjectVersions(projectKey string) ([]jira.Version, error) {
 	return project.Versions, nil
 }
 
-// GetDefaultFixVersion returns the most recently created unreleased version for a project.
+// GetDefaultFixVersion returns the current PI version for a project.
 // It selects a version that is:
 // 1. Not released
 // 2. Not archived
+// 3. Has the closest PI number to current (e.g., PI 25.1 instead of PI 25.5)
 func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, error) {
 	logging.Debug("getting default fix version", "project", projectKey)
 
@@ -691,11 +692,19 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 
 	logging.Debug("found project versions", "count", len(versions))
 
-	// Find the most recently created unreleased version
-	var bestVersion *jira.Version
+	type piVersion struct {
+		major    int
+		minor    int
+		version  *jira.Version
+		released bool
+		archived bool
+	}
+
+	var currentPI *piVersion
+	// Parse and store PI versions
 	for i := range versions {
 		version := &versions[i]
-
+		
 		// Skip released or archived versions
 		released := version.Released != nil && *version.Released
 		archived := version.Archived != nil && *version.Archived
@@ -707,46 +716,76 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 			continue
 		}
 
-		// If we haven't found a version yet, or this one is more recent
-		if bestVersion == nil {
-			bestVersion = version
-			logging.Debug("found first unreleased version", "name", version.Name)
+		// Try to parse PI version (e.g., "PI 25.1")
+		var major, minor int
+		_, err := fmt.Sscanf(version.Name, "PI %d.%d", &major, &minor)
+		if err != nil {
+			logging.Debug("skipping non-PI version", "name", version.Name)
 			continue
 		}
 
-		// Compare sequence IDs if available (higher is more recent)
-		if version.ID > bestVersion.ID {
-			logging.Debug("found more recent version",
+		pv := &piVersion{
+			major:    major,
+			minor:    minor,
+			version:  version,
+			released: released,
+			archived: archived,
+		}
+
+		logging.Debug("found PI version",
+			"name", version.Name,
+			"major", major,
+			"minor", minor)
+
+		// If this is our first version or if it's a better match for current PI
+		if currentPI == nil {
+			currentPI = pv
+			continue
+		}
+
+		// If same major version, prefer lower minor version as it's likely more current
+		if pv.major == currentPI.major && pv.minor < currentPI.minor {
+			currentPI = pv
+			logging.Debug("found better PI version",
 				"name", version.Name,
-				"id", version.ID,
-				"previous_version", bestVersion.Name)
-			bestVersion = version
+				"previous", currentPI.version.Name)
+			continue
+		}
+
+		// If different major version, prefer the higher one as it's more current
+		if pv.major > currentPI.major {
+			currentPI = pv
+			logging.Debug("found newer PI version",
+				"name", version.Name,
+				"previous", currentPI.version.Name)
 		}
 	}
 
 	// Convert Version to FixVersion
-	if bestVersion != nil {
+	if currentPI != nil {
 		released := false
-		if bestVersion.Released != nil {
-			released = *bestVersion.Released
+		if currentPI.version.Released != nil {
+			released = *currentPI.version.Released
 		}
 		archived := false
-		if bestVersion.Archived != nil {
-			archived = *bestVersion.Archived
+		if currentPI.version.Archived != nil {
+			archived = *currentPI.version.Archived
 		}
 		releasedPtr := &released
 		archivedPtr := &archived
 
 		logging.Info("selected fix version",
-			"name", bestVersion.Name,
-			"id", bestVersion.ID,
+			"name", currentPI.version.Name,
+			"id", currentPI.version.ID,
+			"major", currentPI.major,
+			"minor", currentPI.minor,
 			"released", released,
 			"archived", archived)
 
 		return &jira.FixVersion{
-			ID:          bestVersion.ID,
-			Name:        bestVersion.Name,
-			Description: bestVersion.Description,
+			ID:          currentPI.version.ID,
+			Name:        currentPI.version.Name,
+			Description: currentPI.version.Description,
 			Released:    releasedPtr,
 			Archived:    archivedPtr,
 		}, nil
