@@ -4,18 +4,18 @@ package jira
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 
 	jira "github.com/andygrunwald/go-jira"
-	"github.com/danielolaszy/glue/pkg/models"
 	"github.com/danielolaszy/glue/internal/logging"
-
+	"github.com/danielolaszy/glue/pkg/models"
 )
 
 // Client handles interactions with the JIRA API.
 type Client struct {
-	client *jira.Client
+	client   *jira.Client
 	BaseURL  string
 	Username string
 	Token    string
@@ -23,7 +23,7 @@ type Client struct {
 	issueTypeCache map[string]map[string]string // projectKey -> typeName -> typeID
 }
 
-// NewClient creates a new JIRA API client instance using credentials from environment 
+// NewClient creates a new JIRA API client instance using credentials from environment
 // variables. It tests the connection by retrieving the current user. It returns a
 // configured client or an error if authentication fails.
 func NewClient() (*Client, error) {
@@ -31,12 +31,12 @@ func NewClient() (*Client, error) {
 	jiraURL := os.Getenv("JIRA_URL")
 	jiraUsername := os.Getenv("JIRA_USERNAME")
 	jiraToken := os.Getenv("JIRA_TOKEN")
-	
-	logging.Info("jira configuration", 
-		"base_url", jiraURL, 
-		"username", jiraUsername, 
+
+	logging.Info("jira configuration",
+		"base_url", jiraURL,
+		"username", jiraUsername,
 		"token_length", len(jiraToken))
-	
+
 	// Validate credentials
 	var missingVars []string
 	if jiraURL == "" {
@@ -48,33 +48,33 @@ func NewClient() (*Client, error) {
 	if jiraToken == "" {
 		missingVars = append(missingVars, "JIRA_TOKEN")
 	}
-	
+
 	if len(missingVars) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %v", missingVars)
 	}
-	
+
 	// Create transport for authentication
 	tp := jira.BasicAuthTransport{
 		Username: jiraUsername,
 		Password: jiraToken,
 	}
-	
+
 	// Create JIRA client
 	client, err := jira.NewClient(tp.Client(), jiraURL)
 	if err != nil {
 		logging.Error("failed to create jira client", "error", err)
 		return nil, fmt.Errorf("error creating jira client: %v", err)
 	}
-	
+
 	// Verify client is properly initialized
 	if client == nil {
 		return nil, fmt.Errorf("jira client is nil after initialization")
 	}
-	
+
 	if client.Issue == nil {
 		return nil, fmt.Errorf("jira client Issue service is nil")
 	}
-	
+
 	// Test the connection by getting the current user
 	myself, resp, err := client.User.GetSelf()
 	if err != nil {
@@ -82,114 +82,11 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("error testing jira connection: %v", err)
 	}
 	logging.Info("jira authentication successful", "username", myself.EmailAddress)
-	
+
 	return &Client{
-		client: client,
+		client:         client,
 		issueTypeCache: make(map[string]map[string]string),
 	}, nil
-}
-
-// CreateTicket creates a new JIRA ticket from a GitHub issue. It verifies the project
-// exists, determines the appropriate issue type, and creates the ticket with a formatted
-// description. It returns the ID of the created JIRA ticket (e.g., "ABC-123") or an
-// error if creation fails.
-func (c *Client) CreateTicket(projectKey string, issue models.GitHubIssue, issueType string) (string, error) {
-	if c.client == nil {
-		return "", fmt.Errorf("jira client not initialized")
-	}
-
-	// First, let's verify the project exists and get available issue types
-	project, resp, err := c.client.Project.Get(projectKey)
-	if err != nil {
-		logging.Error("failed to get jira project", 
-			"project_key", projectKey, 
-			"error", err, 
-			"status_code", resp.StatusCode)
-		return "", fmt.Errorf("failed to get jira project '%s': %v (status: %d)", 
-			projectKey, err, resp.StatusCode)
-	}
-	
-	// Debug: Print available issue types
-	logging.Debug("available issue types", "project", projectKey)
-	validIssueType := false
-	var availableTypes []string
-	
-	for _, issueTypeObj := range project.IssueTypes {
-		availableTypes = append(availableTypes, issueTypeObj.Name)
-		logging.Debug("issue type", "name", issueTypeObj.Name, "id", issueTypeObj.ID)
-		if issueTypeObj.Name == issueType {
-			validIssueType = true
-		}
-	}
-	
-	// If the requested issue type doesn't exist, use the first available type
-	if !validIssueType {
-		if len(availableTypes) > 0 {
-			logging.Warn("issue type not found, using alternative", 
-				"requested_type", issueType, 
-				"using_type", availableTypes[0])
-			issueType = availableTypes[0]
-		} else {
-			logging.Error("no issue types available in project", "project_key", projectKey)
-			return "", fmt.Errorf("no issue types available in project '%s'", projectKey)
-		}
-	}
-
-	// Prepare issue fields
-	description := fmt.Sprintf("%s\n\n----\nCreated by glue from GitHub issue #%d",
-		issue.Description, issue.Number)
-
-	logging.Info("creating jira ticket", 
-		"project", projectKey, 
-		"type", issueType, 
-		"title", issue.Title)
-	
-	issueFields := &jira.IssueFields{
-		Project: jira.Project{
-			Key: projectKey,
-		},
-		Summary:     issue.Title,
-		Description: description,
-		Type: jira.IssueType{
-			Name: issueType,
-		},
-	}
-
-	// Create the issue
-	jiraIssue := &jira.Issue{
-		Fields: issueFields,
-	}
-
-	logging.Debug("sending request to jira api")
-	
-	newIssue, resp, err := c.client.Issue.Create(jiraIssue)
-	if err != nil {
-		statusCode := 0
-		if resp != nil {
-			statusCode = resp.StatusCode
-			
-			// Try to get more details about the error
-			body, readErr := io.ReadAll(resp.Body)
-			if readErr == nil {
-				logging.Error("failed to create jira ticket", 
-					"error", err, 
-					"status_code", statusCode, 
-					"response", string(body))
-				return "", fmt.Errorf("failed to create jira ticket: %v (status: %d, response: %s)", 
-					err, statusCode, string(body))
-			}
-		}
-		logging.Error("failed to create jira ticket", "error", err, "status_code", statusCode)
-		return "", fmt.Errorf("failed to create jira ticket: %v (status: %d)", err, statusCode)
-	}
-
-	if newIssue == nil {
-		logging.Error("jira api returned nil issue")
-		return "", fmt.Errorf("jira api returned nil issue")
-	}
-
-	logging.Info("created jira ticket", "key", newIssue.Key)
-	return newIssue.Key, nil
 }
 
 // GetTotalTickets returns the total number of tickets in a JIRA project by executing
@@ -228,9 +125,9 @@ func (c *Client) IssueTypeExists(projectKey, typeName string) (bool, string, err
 	// Get the project to see available issue types
 	project, resp, err := c.client.Project.Get(projectKey)
 	if err != nil {
-		logging.Error("failed to get jira project", 
-			"project", projectKey, 
-			"error", err, 
+		logging.Error("failed to get jira project",
+			"project", projectKey,
+			"error", err,
 			"status_code", resp.StatusCode)
 		return false, "", fmt.Errorf("failed to get jira project '%s': %v", projectKey, err)
 	}
@@ -238,9 +135,9 @@ func (c *Client) IssueTypeExists(projectKey, typeName string) (bool, string, err
 	// Check if the issue type already exists
 	for _, issueType := range project.IssueTypes {
 		if strings.EqualFold(issueType.Name, typeName) {
-			logging.Debug("issue type found", 
-				"project", projectKey, 
-				"type", typeName, 
+			logging.Debug("issue type found",
+				"project", projectKey,
+				"type", typeName,
 				"type_id", issueType.ID)
 			return true, issueType.ID, nil
 		}
@@ -250,163 +147,13 @@ func (c *Client) IssueTypeExists(projectKey, typeName string) (bool, string, err
 	return false, "", nil
 }
 
-// AddIssueType creates a new issue type in JIRA. It handles both standard and
-// subtask types. It returns the created issue type or an error if creation fails.
-func (c *Client) AddIssueType(typeName string, isSubTask bool) (*jira.IssueType, error) {
-	if c.client == nil {
-		return nil, fmt.Errorf("jira client not initialized")
-	}
-
-	logging.Info("creating new issue type", "type", typeName, "is_subtask", isSubTask)
-
-	// Prepare the request payload
-	typeCategory := "standard"
-	if isSubTask {
-		typeCategory = "subtask"
-	}
-
-	newIssueType := struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Type        string `json:"type"`
-	}{
-		Name:        typeName,
-		Description: fmt.Sprintf("Issue type for %s", typeName),
-		Type:        typeCategory,
-	}
-
-	// Create the request
-	req, err := c.client.NewRequest("POST", "rest/api/2/issuetype", newIssueType)
-	if err != nil {
-		logging.Error("failed to create request for new issue type", 
-			"type", typeName, 
-			"error", err)
-		return nil, fmt.Errorf("failed to create request for new issue type: %v", err)
-	}
-
-	// Send the request
-	issueTypeResponse := new(jira.IssueType)
-	resp, err := c.client.Do(req, issueTypeResponse)
-	if err != nil {
-		statusCode := 0
-		errorDetails := ""
-		
-		if resp != nil {
-			statusCode = resp.StatusCode
-			
-			// Try to get more details about the error
-			body, readErr := io.ReadAll(resp.Body)
-			if readErr == nil {
-				errorDetails = string(body)
-			}
-		}
-		
-		logging.Error("failed to create issue type", 
-			"type", typeName, 
-			"error", err, 
-			"status_code", statusCode,
-			"response", errorDetails)
-			
-		if errorDetails != "" {
-			return nil, fmt.Errorf("failed to create issue type: %v (status: %d, response: %s)", 
-				err, statusCode, errorDetails)
-		}
-		
-		return nil, fmt.Errorf("failed to create issue type: %v", err)
-	}
-
-	logging.Info("successfully created issue type", 
-		"type", typeName, 
-		"type_id", issueTypeResponse.ID)
-
-	return issueTypeResponse, nil
-}
-
-// CanCreateIssueTypes checks if the current user has permission to create issue types
-// by attempting to access the project metadata. It returns whether the user likely has
-// permission and any error that occurred during checking.
-func (c *Client) CanCreateIssueTypes(projectKey string) (bool, error) {
-	if c.client == nil {
-		return false, fmt.Errorf("jira client not initialized")
-	}
-
-	logging.Debug("checking if user can create issue types", "project", projectKey)
-
-	// Try to get metadata, which requires certain permissions
-	metadata, resp, err := c.client.Issue.GetCreateMeta(projectKey)
-	if err != nil {
-		logging.Error("failed to get jira create metadata", 
-			"project", projectKey, 
-			"error", err, 
-			"status_code", resp.StatusCode)
-		return false, fmt.Errorf("failed to get jira create metadata: %v", err)
-	}
-
-	// Check if we have access to the project
-	for _, project := range metadata.Projects {
-		if project.Key == projectKey {
-			// If we can get the metadata, we might have permission
-			logging.Debug("user has access to project metadata", "project", projectKey)
-			return true, nil
-		}
-	}
-
-	logging.Debug("user may not have permission to create issue types", "project", projectKey)
-	return false, nil
-}
-
-// EnsureIssueTypeExists checks if an issue type exists in the JIRA project and
-// creates it if it doesn't. It returns the type ID and any error that occurred.
-func (c *Client) EnsureIssueTypeExists(projectKey, typeName string) (string, error) {
-	if c.client == nil {
-		return "", fmt.Errorf("jira client not initialized")
-	}
-
-	logging.Info("ensuring issue type exists", "project", projectKey, "type", typeName)
-
-	// Check if the issue type already exists
-	exists, typeID, err := c.IssueTypeExists(projectKey, typeName)
-	if err != nil {
-		return "", err
-	}
-
-	if exists {
-		logging.Info("issue type already exists", "project", projectKey, "type", typeName, "type_id", typeID)
-		return typeID, nil
-	}
-
-	// Check if we have permission to create issue types
-	canCreate, err := c.CanCreateIssueTypes(projectKey)
-	if err != nil {
-		logging.Debug("failed to check permissions for creating issue types", 
-			"project", projectKey, 
-			"error", err)
-		// Continue anyway, we might still be able to find the type
-	}
-
-	if !canCreate {
-		logging.Debug("user may not have permission to create issue types", 
-			"project", projectKey)
-		// Continue anyway, the type might already exist
-	}
-
-	// Create the issue type
-	isSubTask := false // Assume standard issue type
-	newType, err := c.AddIssueType(typeName, isSubTask)
-	if err != nil {
-		return "", err
-	}
-
-	return newType.ID, nil
-}
-
 // GetIssueTypeID retrieves the ID of a specific issue type from a JIRA project.
 // It checks the cache first and loads issue types for the project if necessary.
 // It returns the type ID or an error if the type cannot be found.
 func (c *Client) GetIssueTypeID(projectKey, typeName string) (string, error) {
 	typeName = strings.ToLower(typeName)
 	logging.Debug("retrieving issue type id", "project", projectKey, "type", typeName)
-	
+
 	// Check if we have cached issue types for this project
 	if projectTypes, exists := c.issueTypeCache[projectKey]; exists {
 		// Check if the requested type exists in the cache
@@ -420,14 +167,14 @@ func (c *Client) GetIssueTypeID(projectKey, typeName string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		
+
 		// Now check the cache again
 		if typeID, exists := c.issueTypeCache[projectKey][typeName]; exists {
 			logging.Info("found issue type", "name", typeName, "id", typeID)
 			return typeID, nil
 		}
 	}
-	
+
 	// If we reach here, the issue type doesn't exist in the project
 	return "", fmt.Errorf("issue type '%s' not found in project '%s'", typeName, projectKey)
 }
@@ -439,15 +186,21 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 		return "", fmt.Errorf("jira client not initialized")
 	}
 
-	// Prepare issue fields
-	description := fmt.Sprintf("%s\n\n----\nCreated by glue from GitHub issue #%d",
-		issue.Description, issue.Number)
+	// Get the default fix version for the project
+	fixVersion, err := c.GetDefaultFixVersion(projectKey)
+	if err != nil {
+		logging.Error("failed to get default fix version", "error", err)
+		// Continue without fix version
+	}
 
-	logging.Info("creating jira ticket", 
-		"project", projectKey, 
-		"title", issue.Title, 
+	// Prepare issue fields
+	description := fmt.Sprint("\n\n----\nCreated by glue-cli")
+
+	logging.Info("creating jira ticket",
+		"project", projectKey,
+		"title", issue.Title,
 		"type_id", issueTypeID)
-	
+
 	issueFields := &jira.IssueFields{
 		Project: jira.Project{
 			Key: projectKey,
@@ -455,8 +208,16 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 		Summary:     issue.Title,
 		Description: description,
 		Type: jira.IssueType{
-			ID: issueTypeID, // Use ID instead of name
+			ID: issueTypeID, // Use issue type ID
 		},
+	}
+
+	// Add fix version if available
+	if fixVersion != nil {
+		issueFields.FixVersions = []*jira.FixVersion{fixVersion}
+		logging.Info("adding fix version to ticket",
+			"version_name", fixVersion.Name,
+			"version_id", fixVersion.ID)
 	}
 
 	// Create the issue
@@ -465,21 +226,21 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 	}
 
 	logging.Debug("sending request to jira api")
-	
+
 	newIssue, resp, err := c.client.Issue.Create(jiraIssue)
 	if err != nil {
 		statusCode := 0
 		if resp != nil {
 			statusCode = resp.StatusCode
-			
+
 			// Try to get more details about the error
 			body, readErr := io.ReadAll(resp.Body)
 			if readErr == nil {
-				logging.Error("failed to create jira ticket", 
-					"error", err, 
-					"status_code", statusCode, 
+				logging.Error("failed to create jira ticket",
+					"error", err,
+					"status_code", statusCode,
 					"response", string(body))
-				return "", fmt.Errorf("failed to create jira ticket: %v (status: %d, response: %s)", 
+				return "", fmt.Errorf("failed to create jira ticket: %v (status: %d, response: %s)",
 					err, statusCode, string(body))
 			}
 		}
@@ -500,39 +261,39 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 // repeated API calls. It returns an error if loading fails.
 func (c *Client) LoadIssueTypes(projectKey string) error {
 	logging.Debug("loading all issue types for project", "project", projectKey)
-	
+
 	// Create the cache entry for this project if it doesn't exist
 	if _, exists := c.issueTypeCache[projectKey]; !exists {
 		c.issueTypeCache[projectKey] = make(map[string]string)
 	}
-	
+
 	// Get all issue types for the project
 	project, _, err := c.client.Project.Get(projectKey)
 	if err != nil {
 		logging.Error("failed to get project", "project", projectKey, "error", err)
 		return err
 	}
-	
+
 	logging.Debug("available issue types in project", "project", projectKey)
 	for _, issueType := range project.IssueTypes {
 		typeName := strings.ToLower(issueType.Name)
 		typeID := issueType.ID
-		
+
 		// Cache the issue type
 		c.issueTypeCache[projectKey][typeName] = typeID
 		logging.Debug("cached issue type", "name", issueType.Name, "id", typeID)
 	}
-	
+
 	return nil
 }
 
 // CreateParentChildLink establishes a relationship between JIRA tickets using
 // the "Relates" link type. It returns an error if the linking operation fails.
 func (c *Client) CreateParentChildLink(parentKey, childKey string) error {
-	logging.Info("creating parent-child relationship in JIRA", 
-		"parent", parentKey, 
+	logging.Info("creating parent-child relationship in JIRA",
+		"parent", parentKey,
 		"child", childKey)
-	
+
 	// Check if the client is initialized
 	if c.client == nil {
 		return fmt.Errorf("jira client not initialized")
@@ -550,13 +311,13 @@ func (c *Client) CreateParentChildLink(parentKey, childKey string) error {
 			"key": parentKey,
 		},
 	}
-	
+
 	// Create the request
-	req, err := c.client.NewRequest("POST", "rest/api/2/issueLink", linkData)
+	req, err := c.client.NewRequest(http.MethodPost, "rest/api/2/issueLink", linkData)
 	if err != nil {
 		return fmt.Errorf("failed to create request for linking issues: %v", err)
 	}
-	
+
 	// Send the request
 	resp, err := c.client.Do(req, nil)
 	if err != nil {
@@ -566,6 +327,362 @@ func (c *Client) CreateParentChildLink(parentKey, childKey string) error {
 		}
 		return fmt.Errorf("failed to link issues: %v (status: %d)", err, statusCode)
 	}
-	
+
 	return nil
+}
+
+// CheckParentChildLinkExists checks if a parent-child link already exists in JIRA.
+// It returns true if the link exists, false if it doesn't, and an error if the check fails.
+func (c *Client) CheckParentChildLinkExists(parentKey, childKey string) (bool, error) {
+	logging.Debug("checking if parent-child link exists in JIRA",
+		"parent", parentKey,
+		"child", childKey)
+
+	// Check if the client is initialized
+	if c.client == nil {
+		return false, fmt.Errorf("jira client not initialized")
+	}
+
+	// Get the child issue with its links
+	childIssue, resp, err := c.client.Issue.Get(childKey, nil)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		return false, fmt.Errorf("failed to get child issue: %v (status: %d)", err, statusCode)
+	}
+
+	// Check if there are any links
+	if childIssue.Fields.IssueLinks == nil || len(childIssue.Fields.IssueLinks) == 0 {
+		return false, nil
+	}
+
+	// Check each link to see if it connects to the parent
+	for _, link := range childIssue.Fields.IssueLinks {
+		// Check outward links (where the child is the inward issue)
+		if link.OutwardIssue != nil && link.OutwardIssue.Key == parentKey {
+			return true, nil
+		}
+
+		// Check inward links (where the child is the outward issue)
+		if link.InwardIssue != nil && link.InwardIssue.Key == parentKey {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// GetIssueLinkID retrieves the ID of the link between two JIRA issues.
+// It returns the link ID if found, empty string if not found, and an error if the check fails.
+func (c *Client) GetIssueLinkID(parentKey, childKey string) (string, error) {
+	logging.Debug("finding issue link ID in JIRA",
+		"parent", parentKey,
+		"child", childKey)
+
+	// Check if the client is initialized
+	if c.client == nil {
+		return "", fmt.Errorf("jira client not initialized")
+	}
+
+	// Get the child issue with its links
+	childIssue, resp, err := c.client.Issue.Get(childKey, nil)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		return "", fmt.Errorf("failed to get child issue: %v (status: %d)", err, statusCode)
+	}
+
+	// Check if there are any links
+	if childIssue.Fields.IssueLinks == nil || len(childIssue.Fields.IssueLinks) == 0 {
+		return "", nil
+	}
+
+	// Check each link to see if it connects to the parent
+	for _, link := range childIssue.Fields.IssueLinks {
+		// Check outward links (where the child is the inward issue)
+		if link.OutwardIssue != nil && link.OutwardIssue.Key == parentKey {
+			return link.ID, nil
+		}
+
+		// Check inward links (where the child is the outward issue)
+		if link.InwardIssue != nil && link.InwardIssue.Key == parentKey {
+			return link.ID, nil
+		}
+	}
+
+	return "", nil
+}
+
+// DeleteIssueLink removes a link between two JIRA issues.
+// It returns an error if the deletion fails.
+func (c *Client) DeleteIssueLink(parentKey, childKey string) error {
+	logging.Info("removing parent-child relationship in JIRA",
+		"parent", parentKey,
+		"child", childKey)
+
+	// Check if the client is initialized
+	if c.client == nil {
+		return fmt.Errorf("jira client not initialized")
+	}
+
+	// First, find the ID of the link
+	linkID, err := c.GetIssueLinkID(parentKey, childKey)
+	if err != nil {
+		return fmt.Errorf("failed to find link ID: %v", err)
+	}
+
+	if linkID == "" {
+		logging.Debug("no link found to delete",
+			"parent", parentKey,
+			"child", childKey)
+		return nil // No link to delete
+	}
+
+	// Create the request to delete the link
+	req, err := c.client.NewRequest(http.MethodDelete, "rest/api/2/issueLink/"+linkID, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request for deleting issue link: %v", err)
+	}
+
+	// Send the request
+	resp, err := c.client.Do(req, nil)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		return fmt.Errorf("failed to delete issue link: %v (status: %d)", err, statusCode)
+	}
+
+	logging.Info("successfully removed issue link",
+		"parent", parentKey,
+		"child", childKey)
+
+	return nil
+}
+
+// GetLinkedIssues retrieves all issue keys that are linked to the specified parent issue.
+// It returns a slice of child issue keys or an error if retrieval fails.
+func (c *Client) GetLinkedIssues(parentKey string) ([]string, error) {
+	logging.Debug("retrieving linked issues in JIRA",
+		"parent", parentKey)
+
+	// Check if the client is initialized
+	if c.client == nil {
+		return nil, fmt.Errorf("jira client not initialized")
+	}
+
+	// Get the parent issue with its links
+	parentIssue, resp, err := c.client.Issue.Get(parentKey, nil)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		return nil, fmt.Errorf("failed to get parent issue: %v (status: %d)", err, statusCode)
+	}
+
+	// Check if there are any links
+	if parentIssue.Fields.IssueLinks == nil || len(parentIssue.Fields.IssueLinks) == 0 {
+		return []string{}, nil
+	}
+
+	// Collect all linked issue keys
+	var linkedIssues []string
+	for _, link := range parentIssue.Fields.IssueLinks {
+		// Look for outward links (where the parent is the inward issue)
+		if link.OutwardIssue != nil {
+			linkedIssues = append(linkedIssues, link.OutwardIssue.Key)
+		}
+
+		// Look for inward links (where the parent is the outward issue)
+		if link.InwardIssue != nil {
+			linkedIssues = append(linkedIssues, link.InwardIssue.Key)
+		}
+	}
+
+	return linkedIssues, nil
+}
+
+// CloseTicket transitions a JIRA ticket to the "Done" status.
+// It returns an error if the operation fails.
+func (c *Client) CloseTicket(ticketKey string) error {
+	logging.Info("closing jira ticket", "ticket", ticketKey)
+
+	// Check if the client is initialized
+	if c.client == nil {
+		return fmt.Errorf("jira client not initialized")
+	}
+
+	// Get available transitions for the ticket
+	transitions, resp, err := c.client.Issue.GetTransitions(ticketKey)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		return fmt.Errorf("failed to get transitions for ticket %s: %v (status: %d)",
+			ticketKey, err, statusCode)
+	}
+
+	// Look for a "Done" or "Closed" transition
+	var transitionID string
+	for _, t := range transitions {
+		name := strings.ToLower(t.Name)
+		if name == "done" || name == "close" || name == "closed" || name == "resolve" || name == "resolved" {
+			transitionID = t.ID
+			break
+		}
+	}
+
+	if transitionID == "" {
+		return fmt.Errorf("no 'done' or 'close' transition found for ticket %s", ticketKey)
+	}
+
+	// Execute the transition
+	resp, err = c.client.Issue.DoTransition(ticketKey, transitionID)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		return fmt.Errorf("failed to close ticket %s: %v (status: %d)",
+			ticketKey, err, statusCode)
+	}
+
+	logging.Info("successfully closed jira ticket", "ticket", ticketKey)
+	return nil
+}
+
+// GetProjectVersions retrieves all versions for a JIRA project.
+// It returns a slice of versions or an error if retrieval fails.
+func (c *Client) GetProjectVersions(projectKey string) ([]jira.Version, error) {
+	if c.client == nil {
+		return nil, fmt.Errorf("jira client not initialized")
+	}
+
+	logging.Debug("retrieving project versions", "project", projectKey)
+
+	// Get project to access versions
+	project, resp, err := c.client.Project.Get(projectKey)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		logging.Error("failed to get project versions",
+			"project", projectKey,
+			"error", err,
+			"status_code", statusCode)
+		return nil, fmt.Errorf("failed to get project versions: %v (status: %d)", err, statusCode)
+	}
+
+	return project.Versions, nil
+}
+
+// GetDefaultFixVersion returns the latest unreleased version for a project.
+// If no unreleased version exists, it returns nil.
+func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, error) {
+	logging.Debug("getting default fix version", "project", projectKey)
+
+	versions, err := c.GetProjectVersions(projectKey)
+	if err != nil {
+		logging.Error("failed to get project versions", "error", err)
+		return nil, err
+	}
+
+	logging.Debug("found project versions", "count", len(versions))
+
+	// Look for the latest unreleased version
+	var latestVersion *jira.Version
+	for i := range versions {
+		version := &versions[i]
+		
+		// Log version details
+		released := false
+		if version.Released != nil {
+			released = *version.Released
+		}
+		logging.Debug("checking version",
+			"name", version.Name,
+			"id", version.ID,
+			"released", released,
+			"start_date", version.StartDate)
+
+		if version.Released != nil && *version.Released {
+			logging.Debug("skipping released version", "name", version.Name)
+			continue
+		}
+
+		// If current version has no start date, skip comparison
+		if version.StartDate == "" {
+			logging.Debug("skipping version with no start date", "name", version.Name)
+			continue
+		}
+
+		// If we have no latest version yet, or this version is newer
+		if latestVersion == nil || version.StartDate > latestVersion.StartDate {
+			logging.Debug("found newer version",
+				"name", version.Name,
+				"start_date", version.StartDate,
+				"previous_version", latestVersion.Name)
+			latestVersion = version
+		}
+	}
+
+	// If we didn't find a version with a start date, use the first unreleased version
+	if latestVersion == nil {
+		logging.Debug("no version with start date found, looking for any unreleased version")
+		for i := range versions {
+			version := &versions[i]
+			released := false
+			if version.Released != nil {
+				released = *version.Released
+			}
+			logging.Debug("checking version for release status",
+				"name", version.Name,
+				"released", released)
+
+			if version.Released == nil || !*version.Released {
+				logging.Debug("found unreleased version", "name", version.Name)
+				latestVersion = version
+				break
+			}
+		}
+	}
+
+	// Convert Version to FixVersion
+	if latestVersion != nil {
+		released := false
+		if latestVersion.Released != nil {
+			released = *latestVersion.Released
+		}
+		archived := false
+		if latestVersion.Archived != nil {
+			archived = *latestVersion.Archived
+		}
+		releasedPtr := &released
+		archivedPtr := &archived
+
+		logging.Info("selected fix version",
+			"name", latestVersion.Name,
+			"id", latestVersion.ID,
+			"released", released,
+			"archived", archived)
+
+		return &jira.FixVersion{
+			ID:          latestVersion.ID,
+			Name:        latestVersion.Name,
+			Description: latestVersion.Description,
+			Released:    releasedPtr,
+			Archived:    archivedPtr,
+		}, nil
+	}
+
+	logging.Info("no suitable fix version found")
+	return nil, nil
 }

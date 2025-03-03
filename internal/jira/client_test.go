@@ -4,8 +4,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/danielolaszy/glue/pkg/models"
 )
 
 func TestJiraClientCredentialValidation(t *testing.T) {
@@ -22,43 +20,43 @@ func TestJiraClientCredentialValidation(t *testing.T) {
 	}()
 
 	testCases := []struct {
-		name      string
-		url       string
-		username  string
-		token     string
-		wantError bool
+		name          string
+		url           string
+		username      string
+		token         string
+		wantError     bool
 		errorContains string
 	}{
 		{
-			name:      "All credentials provided but invalid",
-			url:       "https://example.atlassian.net",
-			username:  "test@example.com",
-			token:     "test-token",
-			wantError: true,
+			name:          "All credentials provided but invalid",
+			url:           "https://example.atlassian.net",
+			username:      "test@example.com",
+			token:         "test-token",
+			wantError:     true,
 			errorContains: "401", // We expect a 401 unauthorized error
 		},
 		{
-			name:      "Missing URL",
-			url:       "",
-			username:  "test@example.com",
-			token:     "test-token",
-			wantError: true,
+			name:          "Missing URL",
+			url:           "",
+			username:      "test@example.com",
+			token:         "test-token",
+			wantError:     true,
 			errorContains: "JIRA_URL",
 		},
 		{
-			name:      "Missing username",
-			url:       "https://example.atlassian.net",
-			username:  "",
-			token:     "test-token",
-			wantError: true,
+			name:          "Missing username",
+			url:           "https://example.atlassian.net",
+			username:      "",
+			token:         "test-token",
+			wantError:     true,
 			errorContains: "JIRA_USERNAME",
 		},
 		{
-			name:      "Missing token",
-			url:       "https://example.atlassian.net",
-			username:  "test@example.com",
-			token:     "",
-			wantError: true,
+			name:          "Missing token",
+			url:           "https://example.atlassian.net",
+			username:      "test@example.com",
+			token:         "",
+			wantError:     true,
 			errorContains: "JIRA_TOKEN",
 		},
 	}
@@ -115,7 +113,7 @@ func TestIssueTypeCache(t *testing.T) {
 
 	// Verify cache contains the entry
 	if client.issueTypeCache[projectKey][typeName] != typeID {
-		t.Errorf("Expected cache to contain %s:%s=%s, got %s", 
+		t.Errorf("Expected cache to contain %s:%s=%s, got %s",
 			projectKey, typeName, typeID, client.issueTypeCache[projectKey][typeName])
 	}
 }
@@ -125,49 +123,107 @@ func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
-// MockClient is a simplified test double for the JIRA client
-type MockClient struct{}
-
-// TestCreateTicketWithMock tests the CreateTicket function with mocked dependencies
-func TestCreateTicketBasics(t *testing.T) {
-	// Create a test GitHub issue
-	issue := models.GitHubIssue{
-		Number:      123,
-		Title:       "Test Issue",
-		Description: "This is a test issue description",
-		Labels:      []string{"bug", "priority:high"},
-	}
-
-	// Create a client directly with initialized cache
-	client := &Client{
-		issueTypeCache: make(map[string]map[string]string),
-	}
-
-	// Test validation when client is nil
-	client.client = nil
-	_, err := client.CreateTicket("TEST", issue, "Story")
-	if err == nil {
-		t.Error("Expected error when client is nil, got nil")
-	}
-	if !contains(err.Error(), "not initialized") {
-		t.Errorf("Expected error to mention 'not initialized', got: %v", err)
-	}
-}
-
 // TestCreateParentChildLinkValidation tests basic validation in the CreateParentChildLink function
 func TestCreateParentChildLinkValidation(t *testing.T) {
 	// Create a client directly with initialized cache but nil client
-	client := &Client{
-		issueTypeCache: make(map[string]map[string]string),
-	}
-	
-	// Test validation when client is nil
-	client.client = nil
+	client := &Client{} // Intentionally not initialized
+
+	// Test with nil client
 	err := client.CreateParentChildLink("TEST-1", "TEST-2")
 	if err == nil {
 		t.Error("Expected error when client is nil, got nil")
 	}
-	if !contains(err.Error(), "not initialized") {
-		t.Errorf("Expected error to mention 'not initialized', got: %v", err)
+	if err != nil && !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("Expected 'not initialized' error, got: %v", err)
 	}
-} 
+}
+
+// TestDeleteIssueLinkValidation tests basic validation in the DeleteIssueLink function
+func TestDeleteIssueLinkValidation(t *testing.T) {
+	// Test with nil client
+	client := &Client{} // Intentionally not initialized
+	err := client.DeleteIssueLink("TEST-1", "TEST-2")
+
+	// Should return an error when client is nil
+	if err == nil {
+		t.Error("Expected error when client is nil, got nil")
+	}
+	if err != nil && !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("Expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// TestGetLinkedIssuesValidation tests basic validation in the GetLinkedIssues function
+func TestGetLinkedIssuesValidation(t *testing.T) {
+	// Test with nil client
+	client := &Client{} // Intentionally not initialized
+	issues, err := client.GetLinkedIssues("TEST-1")
+
+	// Should return an error when client is nil
+	if err == nil {
+		t.Error("Expected error when client is nil, got nil")
+	}
+	if err != nil && !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("Expected 'not initialized' error, got: %v", err)
+	}
+
+	// Should return nil for issues when there's an error
+	if issues != nil {
+		t.Errorf("Expected nil issues when there's an error, got: %v", issues)
+	}
+}
+
+// TestGetIssueLinkIDValidation tests basic validation in the GetIssueLinkID function
+func TestGetIssueLinkIDValidation(t *testing.T) {
+	// Test with nil client
+	client := &Client{} // Intentionally not initialized
+	linkID, err := client.GetIssueLinkID("TEST-1", "TEST-2")
+
+	// Should return an error when client is nil
+	if err == nil {
+		t.Error("Expected error when client is nil, got nil")
+	}
+	if err != nil && !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("Expected 'not initialized' error, got: %v", err)
+	}
+
+	// Should return empty string when there's an error
+	if linkID != "" {
+		t.Errorf("Expected empty link ID when there's an error, got: %s", linkID)
+	}
+}
+
+// TestCheckParentChildLinkExistsValidation tests basic validation in the CheckParentChildLinkExists function
+func TestCheckParentChildLinkExistsValidation(t *testing.T) {
+	// Test with nil client
+	client := &Client{} // Intentionally not initialized
+	exists, err := client.CheckParentChildLinkExists("TEST-1", "TEST-2")
+
+	// Should return an error when client is nil
+	if err == nil {
+		t.Error("Expected error when client is nil, got nil")
+	}
+	if err != nil && !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("Expected 'not initialized' error, got: %v", err)
+	}
+
+	// Should return false when there's an error
+	if exists {
+		t.Error("Expected false when there's an error, got true")
+	}
+}
+
+// TestCloseTicketValidation tests basic validation in the CloseTicket function
+func TestCloseTicketValidation(t *testing.T) {
+	// Test with nil client
+	client := &Client{} // Intentionally not initialized
+	err := client.CloseTicket("TEST-1")
+
+	// Should return an error when client is nil
+	if err == nil {
+		t.Error("Expected error when client is nil, got nil")
+	}
+	if err != nil && !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("Expected 'not initialized' error, got: %v", err)
+	}
+}

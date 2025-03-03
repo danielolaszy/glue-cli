@@ -2,6 +2,7 @@ package github
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -121,3 +122,33 @@ func TestNewClientWithMock(t *testing.T) {
 	}
 }
 */
+
+// TestIsIssueClosedValidation tests the validation in the IsIssueClosed function
+func TestIsIssueClosedValidation(t *testing.T) {
+	// Create a client directly with initialized fields but without API connection
+	client := &Client{}
+
+	// Test with invalid repository format
+	_, err := client.IsIssueClosed("invalid-repo-format", 123)
+	if err == nil {
+		t.Error("Expected error with invalid repository format, got nil")
+	}
+	if err != nil && !strings.Contains(err.Error(), "invalid repository format") {
+		t.Errorf("Expected 'invalid repository format' error, got: %v", err)
+	}
+}
+
+// TestGetClosedIssuesValidation tests the validation in the GetClosedIssues function
+func TestGetClosedIssuesValidation(t *testing.T) {
+	// Create a client directly with initialized fields but without API connection
+	client := &Client{}
+
+	// Test with invalid repository format
+	_, err := client.GetClosedIssues("invalid-repo-format")
+	if err == nil {
+		t.Error("Expected error with invalid repository format, got nil")
+	}
+	if err != nil && !strings.Contains(err.Error(), "invalid repository format") {
+		t.Errorf("Expected 'invalid repository format' error, got: %v", err)
+	}
+}

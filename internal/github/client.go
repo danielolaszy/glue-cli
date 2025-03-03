@@ -273,3 +273,101 @@ func (c *Client) HasLabelMatching(repository string, issueNumber int, pattern *r
 
 	return false, nil
 }
+
+// IsIssueClosed checks if a GitHub issue is closed.
+// The repository should be in the format "owner/repo". It returns true if the issue
+// is closed, false if it's open, and any error encountered during checking.
+func (c *Client) IsIssueClosed(repository string, issueNumber int) (bool, error) {
+	// Parse repository owner and name
+	parts := strings.Split(repository, "/")
+	if len(parts) != 2 {
+		return false, fmt.Errorf("invalid repository format: %s, expected format: owner/repo", repository)
+	}
+	owner, repo := parts[0], parts[1]
+
+	// Context for API requests
+	ctx := context.Background()
+
+	// Get the issue
+	issue, resp, err := c.client.Issues.Get(ctx, owner, repo, issueNumber)
+	if err != nil {
+		logging.Error("failed to get github issue", 
+			"repository", repository, 
+			"issue_number", issueNumber, 
+			"error", err, 
+			"status_code", resp.StatusCode)
+		return false, fmt.Errorf("failed to get GitHub issue: %v", err)
+	}
+
+	// Check the state of the issue
+	return *issue.State == "closed", nil
+}
+
+// GetClosedIssues retrieves all closed issues from a GitHub repository.
+// It filters out pull requests and converts the GitHub API objects to our internal model.
+// The repository should be in the format "owner/repo". It returns a slice of issues
+// or an error if the retrieval fails.
+func (c *Client) GetClosedIssues(repository string) ([]models.GitHubIssue, error) {
+	// Parse repository owner and name
+	parts := strings.Split(repository, "/")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid repository format: %s, expected format: owner/repo", repository)
+	}
+	owner, repo := parts[0], parts[1]
+
+	// Context for API requests
+	ctx := context.Background()
+
+	// Get all closed issues
+	opts := &github.IssueListByRepoOptions{
+		State: "closed",
+		ListOptions: github.ListOptions{
+			PerPage: 100,
+		},
+	}
+
+	var allIssues []*github.Issue
+	for {
+		issues, resp, err := c.client.Issues.ListByRepo(ctx, owner, repo, opts)
+		if err != nil {
+			logging.Error("failed to fetch closed github issues", "error", err)
+			return nil, fmt.Errorf("failed to fetch GitHub closed issues: %v", err)
+		}
+
+		allIssues = append(allIssues, issues...)
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	// Filter out pull requests and convert to our internal model
+	var result []models.GitHubIssue
+	for _, issue := range allIssues {
+		// Skip pull requests (they're also returned by the Issues API)
+		if issue.PullRequestLinks != nil {
+			continue
+		}
+
+		// Convert to our internal model
+		labelNames := make([]string, 0, len(issue.Labels))
+		for _, label := range issue.Labels {
+			labelNames = append(labelNames, *label.Name)
+		}
+
+		description := ""
+		if issue.Body != nil {
+			description = *issue.Body
+		}
+
+		result = append(result, models.GitHubIssue{
+			Number:      *issue.Number,
+			Title:       *issue.Title,
+			Description: description,
+			Labels:      labelNames,
+		})
+	}
+
+	return result, nil
+}
