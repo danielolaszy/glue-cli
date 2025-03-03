@@ -54,9 +54,8 @@ func NewClient() (*Client, error) {
 	}
 
 	// Create transport for authentication
-	tp := jira.BasicAuthTransport{
-		Username: jiraUsername,
-		Password: jiraToken,
+	tp := jira.BearerAuthTransport{
+		Token: jiraToken,
 	}
 
 	// Create JIRA client
@@ -180,10 +179,10 @@ func (c *Client) GetIssueTypeID(projectKey, typeName string) (string, error) {
 }
 
 // getCustomField retrieves the custom field ID by its name.
-// It returns the field ID or an error if the field cannot be found.
-func (c *Client) getCustomField(name string) (string, error) {
+// It returns the field ID, field type, and any error that occurred.
+func (c *Client) getCustomField(name string) (string, string, error) {
 	if c.client == nil {
-		return "", fmt.Errorf("jira client not initialized")
+		return "", "", fmt.Errorf("jira client not initialized")
 	}
 
 	logging.Debug("getting custom field ID", "name", name)
@@ -191,12 +190,16 @@ func (c *Client) getCustomField(name string) (string, error) {
 	// Get all fields
 	req, err := c.client.NewRequest("GET", "rest/api/2/field", nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create request for getting fields: %v", err)
+		return "", "", fmt.Errorf("failed to create request for getting fields: %v", err)
 	}
 
 	var fields []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Schema    struct {
+			Type   string `json:"type"`
+			Custom string `json:"custom,omitempty"`
+		} `json:"schema"`
 	}
 
 	resp, err := c.client.Do(req, &fields)
@@ -205,7 +208,7 @@ func (c *Client) getCustomField(name string) (string, error) {
 		if resp != nil {
 			statusCode = resp.StatusCode
 		}
-		return "", fmt.Errorf("failed to get fields: %v (status: %d)", err, statusCode)
+		return "", "", fmt.Errorf("failed to get fields: %v (status: %d)", err, statusCode)
 	}
 
 	// Find the field with matching name
@@ -213,12 +216,14 @@ func (c *Client) getCustomField(name string) (string, error) {
 		if field.Name == name {
 			logging.Debug("found custom field",
 				"name", name,
-				"id", field.ID)
-			return field.ID, nil
+				"id", field.ID,
+				"type", field.Schema.Type,
+				"custom", field.Schema.Custom)
+			return field.ID, field.Schema.Type, nil
 		}
 	}
 
-	return "", fmt.Errorf("custom field '%s' not found", name)
+	return "", "", fmt.Errorf("custom field '%s' not found", name)
 }
 
 // CreateTicketWithTypeID creates a new JIRA ticket with a specific issue type ID.
@@ -265,14 +270,14 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 		logging.Debug("adding custom fields for feature type")
 
 		// Get Feature Name field ID
-		featureNameFieldID, err := c.getCustomField("Feature Name")
+		featureNameFieldID, featureNameType, err := c.getCustomField("Feature Name")
 		if err != nil {
 			logging.Error("failed to get Feature Name field ID", "error", err)
 			return "", fmt.Errorf("failed to get Feature Name field ID: %v", err)
 		}
 
 		// Get Primary Feature Work Type field ID
-		workTypeFieldID, err := c.getCustomField("Primary Feature Work Type")
+		workTypeFieldID, workTypeFieldType, err := c.getCustomField("Primary Feature Work Type")
 		if err != nil {
 			logging.Error("failed to get Primary Feature Work Type field ID", "error", err)
 			return "", fmt.Errorf("failed to get Primary Feature Work Type field ID: %v", err)
@@ -283,10 +288,19 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 			issueFields.Unknowns = make(map[string]interface{})
 		}
 
-		// Add custom fields to the request
-		customFields := map[string]interface{}{
-			featureNameFieldID: issue.Title,
-			workTypeFieldID:    "New Feature", // You might want to make this configurable
+		// Add custom fields to the request with proper formatting based on field type
+		customFields := make(map[string]interface{})
+
+		// Feature Name is likely a text field, so we can use the value directly
+		customFields[featureNameFieldID] = issue.Title
+
+		// Primary Feature Work Type is likely a select/option field, so we need to format it properly
+		if workTypeFieldType == "option" {
+			customFields[workTypeFieldID] = map[string]interface{}{
+				"value": "New Feature", // You might want to make this configurable
+			}
+		} else {
+			customFields[workTypeFieldID] = "New Feature"
 		}
 
 		// Add custom fields to issue fields
@@ -296,7 +310,9 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 
 		logging.Debug("added custom fields",
 			"feature_name_id", featureNameFieldID,
-			"work_type_id", workTypeFieldID)
+			"feature_name_type", featureNameType,
+			"work_type_id", workTypeFieldID,
+			"work_type_type", workTypeFieldType)
 	}
 
 	// Create the issue
@@ -680,7 +696,7 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 	var latestVersion *jira.Version
 	for i := range versions {
 		version := &versions[i]
-		
+
 		// Log version details
 		released := false
 		if version.Released != nil {
