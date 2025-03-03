@@ -21,15 +21,14 @@ var jiraCmd = &cobra.Command{
 	Long: `Synchronize GitHub issues with a JIRA board.
 
 This command will create JIRA tickets for any GitHub issues that aren't
-already linked to a JIRA project. It adds a 'jira-id: <JIRA_ID>'
-label to GitHub issues that have been synchronized.
+already linked to a JIRA project.
 
 Every GitHub issue must have a 'jira-project: <BOARD_NAME>' label to specify
 which JIRA board the issue should be created on.
 
-Issues will be categorized based on their existing labels:
-- GitHub issues with a 'type: feature' label will be created as 'Feature' type in JIRA
-- GitHub issues with a 'type: story' label will be created as 'Story' type in JIRA
+Issues will be categorized based on their labels:
+- GitHub issues with a 'feature' label will be created as 'Feature' type in JIRA
+- GitHub issues with a 'story' label will be created as 'Story' type in JIRA
 - Other GitHub issues will be created as 'Task' type in JIRA by default`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repository, err := cmd.Flags().GetString("repository")
@@ -193,7 +192,7 @@ func establishHierarchies(repository string, githubClient *github.Client, jiraCl
 		}
 
 		// Only process feature issues
-		if !hasLabel(labels, "type: feature") {
+		if !hasLabel(labels, "feature") {
 			continue
 		}
 
@@ -480,33 +479,12 @@ func createJiraTickets(repository string, githubClient *github.Client, jiraClien
 			storyTypeID = featureTypeID
 		}
 
-		// Check if issue already has a JIRA ID label for this project
-		jiraIDPrefix := fmt.Sprintf("jira-id: %s-", jiraProjectKey)
-		hasProjectLabel := false
-
-		for _, label := range labels {
-			if strings.HasPrefix(label, jiraIDPrefix) {
-				hasProjectLabel = true
-				break
-			}
-		}
-
-		if hasProjectLabel {
-			// Issue already synchronized with this project
-			logging.Debug("issue already synchronized, skipping",
-				"repository", repository,
-				"issue_number", issue.Number,
-				"jira_project", jiraProjectKey,
-			)
-			continue
-		}
-
 		// Use the type IDs when creating tickets
 		var issueTypeID string
-		if hasLabel(labels, "type: feature") {
+		if hasLabel(labels, "feature") {
 			logging.Debug("using feature type for issue", "issue_number", issue.Number)
 			issueTypeID = featureTypeID
-		} else if hasLabel(labels, "type: story") {
+		} else if hasLabel(labels, "story") {
 			logging.Debug("using story type for issue", "issue_number", issue.Number)
 			issueTypeID = storyTypeID
 		} else {
