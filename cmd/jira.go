@@ -459,27 +459,25 @@ func createJiraTickets(repository string, githubClient *github.Client, jiraClien
 
 		logging.Info("found 'jira-project:' label",
 			"issue_number", issue.Number,
-			"repository", repository,
 			"board", jiraProjectKey)
 
-		storyTypeID, err := jiraClient.GetIssueTypeID(jiraProjectKey, "story")
+		// Get issue type IDs for the project
+		featureTypeID, err := jiraClient.GetIssueTypeID(jiraProjectKey, "feature")
 		if err != nil {
-			logging.Error("failed to get 'story' type ID for project, ensure it exists in the jira project",
+			logging.Error("failed to get 'feature' type ID for project, ensure it exists in the jira project",
 				"project", jiraProjectKey,
 				"issue_number", issue.Number,
-				"repository", repository,
 				"error", err)
 			continue
 		}
 
-		featureTypeID, err := jiraClient.GetIssueTypeID(jiraProjectKey, "feature")
+		// Get the story type ID
+		storyTypeID, err := jiraClient.GetIssueTypeID(jiraProjectKey, "story")
 		if err != nil {
-			logging.Warn("failed to get 'feature' type ID for project, ensure it exists in the jira project",
+			logging.Warn("failed to get 'story' type ID for project, ensure it exists in the jira project",
 				"project", jiraProjectKey,
-				"issue_number", issue.Number,
-				"repository", repository,
-				"error", err)
-			continue
+				"issue_number", issue.Number)
+			storyTypeID = featureTypeID
 		}
 
 		// Check if issue already has a JIRA ID label for this project

@@ -226,6 +226,52 @@ func (c *Client) getCustomField(name string) (string, string, error) {
 	return "", "", fmt.Errorf("custom field '%s' not found", name)
 }
 
+// getCustomFieldOptionID retrieves the ID for a specific option value in a custom field.
+// It returns the option ID or an error if the option cannot be found.
+func (c *Client) getCustomFieldOptionID(fieldID, optionValue string) (string, error) {
+	if c.client == nil {
+		return "", fmt.Errorf("jira client not initialized")
+	}
+
+	logging.Debug("getting custom field option ID",
+		"field_id", fieldID,
+		"option_value", optionValue)
+
+	// Get the field configuration including allowed values
+	req, err := c.client.NewRequest("GET", fmt.Sprintf("rest/api/2/field/%s/context/defaultValue", fieldID), nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request for getting field options: %v", err)
+	}
+
+	var response struct {
+		Options []struct {
+			ID    string `json:"id"`
+			Value string `json:"value"`
+		} `json:"options"`
+	}
+
+	resp, err := c.client.Do(req, &response)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		return "", fmt.Errorf("failed to get field options: %v (status: %d)", err, statusCode)
+	}
+
+	// Find the option with matching value
+	for _, option := range response.Options {
+		if option.Value == optionValue {
+			logging.Debug("found option ID",
+				"value", optionValue,
+				"id", option.ID)
+			return option.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("option value '%s' not found for field ID %s", optionValue, fieldID)
+}
+
 // CreateTicketWithTypeID creates a new JIRA ticket with a specific issue type ID.
 // It returns the ID of the created ticket or an error if creation fails.
 func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIssue, issueTypeID string) (string, error) {
@@ -294,13 +340,21 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 		// Feature Name is likely a text field, so we can use the value directly
 		customFields[featureNameFieldID] = issue.Title
 
-		// Primary Feature Work Type is likely a select/option field, so we need to format it properly
+		// Primary Feature Work Type is a select/option field
+		const workTypeValue = "Other Non-Application Development activities"
 		if workTypeFieldType == "option" {
+			// Get the option ID for the work type value
+			optionID, err := c.getCustomFieldOptionID(workTypeFieldID, workTypeValue)
+			if err != nil {
+				logging.Error("failed to get work type option ID", "error", err)
+				return "", fmt.Errorf("failed to get work type option ID: %v", err)
+			}
+
 			customFields[workTypeFieldID] = map[string]interface{}{
-				"value": "New Feature", // You might want to make this configurable
+				"id": optionID,
 			}
 		} else {
-			customFields[workTypeFieldID] = "New Feature"
+			customFields[workTypeFieldID] = workTypeValue
 		}
 
 		// Add custom fields to issue fields
