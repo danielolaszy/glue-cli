@@ -864,3 +864,29 @@ func (c *Client) GetIssueLinks(issueID string) (map[string]bool, error) {
 
 	return children, nil
 }
+
+// GetTicketStatus retrieves the current status of a JIRA ticket
+func (c *Client) GetTicketStatus(issueID string) (string, error) {
+	if c.client == nil {
+		return "", fmt.Errorf("jira client not initialized")
+	}
+
+	logging.Debug("getting ticket status", "ticket", issueID)
+
+	issue, _, err := c.client.Issue.Get(issueID, &jira.GetQueryOptions{
+		Fields: "status",
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get issue status: %v", err)
+	}
+
+	if issue == nil || issue.Fields == nil || issue.Fields.Status == nil {
+		return "", fmt.Errorf("invalid issue response")
+	}
+
+	logging.Debug("got ticket status",
+		"ticket", issueID,
+		"status", issue.Fields.Status.Name)
+
+	return issue.Fields.Status.Name, nil
+}

@@ -73,6 +73,20 @@ Issues will be categorized based on their labels:
 			return fmt.Errorf("failed to fetch github issues: %v", err)
 		}
 
+		// Also get closed issues for relationship mapping
+		closedIssues, err := githubClient.GetClosedIssuesWithLabels(repository, boards)
+		if err != nil {
+			logging.Warn("failed to fetch closed github issues for relationships",
+				"error", err)
+		} else {
+			// Combine open and closed issues for processing
+			issues = append(issues, closedIssues...)
+			logging.Debug("combined issues for processing",
+				"open_count", len(issues)-len(closedIssues),
+				"closed_count", len(closedIssues),
+				"total_count", len(issues))
+		}
+
 		logging.Info("found github issues",
 			"total_count", len(issues),
 			"boards", boards)
@@ -118,13 +132,23 @@ Issues will be categorized based on their labels:
 		// After all boards are processed, check and update hierarchies
 		logging.Info("checking issue hierarchies")
 		for _, board := range boards {
-			err := establishHierarchies(context.Background(), githubClient, jiraClient, board, issuesByBoard[board])
+			err := establishHierarchies(context.Background(), githubClient, jiraClient, repository, board, issuesByBoard[board])
 			if err != nil {
 				logging.Error("failed to establish hierarchies for board",
 					"board", board,
 					"error", err)
 				continue
 			}
+		}
+
+		// Process all closed issues once
+		closeCount, err := syncClosedIssues(repository, githubClient, jiraClient)
+		if err != nil {
+			logging.Error("failed to sync closed issues",
+				"error", err)
+		} else if closeCount > 0 {
+			logging.Info("closed jira tickets",
+				"count", closeCount)
 		}
 
 		logging.Info("synchronization complete",
@@ -208,13 +232,14 @@ func processBoard(repository string, board string, issues []models.GitHubIssue, 
 		syncCount++
 	}
 
-	// Process stories and others
+	// Process stories and others with the same pattern
+	var updatedStories []models.GitHubIssue
 	for _, issueGroup := range []struct {
 		issues []models.GitHubIssue
 		typeID string
 	}{
 		{stories, storyTypeID},
-		{others, storyTypeID}, // Default to story type
+		{others, storyTypeID},
 	} {
 		for _, issue := range issueGroup.issues {
 			ticketID, err := jiraClient.CreateTicketWithTypeID(board, issue, issueGroup.typeID)
@@ -234,13 +259,24 @@ func processBoard(repository string, board string, issues []models.GitHubIssue, 
 				continue
 			}
 
+			// Get the updated issue
+			updatedIssue, err := githubClient.GetIssue(repository, issue.Number)
+			if err != nil {
+				logging.Error("failed to fetch updated issue",
+					"issue_number", issue.Number,
+					"error", err)
+				continue
+			}
+
+			updatedStories = append(updatedStories, updatedIssue)
 			syncCount++
 		}
 	}
 
-	// Process hierarchies after all tickets are created, using the updated features
-	if len(updatedFeatures) > 0 {
-		if err := establishHierarchies(context.Background(), githubClient, jiraClient, board, updatedFeatures); err != nil {
+	// Process hierarchies after all tickets are created and updated
+	allUpdatedIssues := append(updatedFeatures, updatedStories...)
+	if len(allUpdatedIssues) > 0 {
+		if err := establishHierarchies(context.Background(), githubClient, jiraClient, repository, board, allUpdatedIssues); err != nil {
 			logging.Error("error establishing hierarchies",
 				"board", board,
 				"error", err)
@@ -343,55 +379,61 @@ func extractJiraIDFromTitle(title string) (string, bool) {
 	return "", false
 }
 
-// syncClosedIssues checks all GitHub issues with jira-id labels that are closed
-// and closes their corresponding JIRA tickets. It returns the number of
-// JIRA tickets closed and any error encountered during the process.
-func syncClosedIssues(repository string, board string, githubClient *github.Client, jiraClient *jira.Client) (int, error) {
+// syncClosedIssues checks all GitHub issues that are closed and have JIRA IDs
+// in their titles, then closes their corresponding JIRA tickets if they're not already closed.
+func syncClosedIssues(repository string, githubClient *github.Client, jiraClient *jira.Client) (int, error) {
 	logging.Info("checking for closed github issues", "repository", repository)
 
-	// Parse repository owner and name
-	parts := strings.Split(repository, "/")
-	if len(parts) != 2 {
-		return 0, fmt.Errorf("invalid repository format: %s, expected format: owner/repo", repository)
-	}
-
-	// Get all issues from GitHub (including closed ones)
-	// Use the method we added to our client
+	// Get all closed issues from GitHub
 	closedIssues, err := githubClient.GetClosedIssues(repository)
 	if err != nil {
 		logging.Error("failed to fetch closed github issues", "error", err)
 		return 0, fmt.Errorf("failed to fetch closed GitHub issues: %v", err)
 	}
 
-	logging.Info("found closed github issues", "count", len(closedIssues), "repository", repository)
+	logging.Info("found closed github issues", 
+		"count", len(closedIssues), 
+		"repository", repository)
+	
 	closeCount := 0
 
 	// Process each closed issue
 	for _, issue := range closedIssues {
-		// Get labels for the issue
-		labels, err := githubClient.GetLabelsForIssue(repository, issue.Number)
-		if err != nil {
-			logging.Error("failed to fetch labels for closed issue",
+		// Extract JIRA ID from title
+		jiraID := parseJiraIDFromTitle(issue.Title)
+		if jiraID == "" {
+			logging.Debug("closed issue has no JIRA ID in title, skipping",
 				"repository", repository,
 				"issue_number", issue.Number,
+				"title", issue.Title)
+			continue
+		}
+
+		// Check if the JIRA ticket is already closed
+		status, err := jiraClient.GetTicketStatus(jiraID)
+		if err != nil {
+			logging.Error("failed to get jira ticket status",
+				"repository", repository,
+				"issue_number", issue.Number,
+				"jira_ticket", jiraID,
 				"error", err)
 			continue
 		}
 
-		// Check for jira-id label
-		jiraID := getJiraIDFromLabels(labels)
-		if jiraID == "" {
-			logging.Debug("closed issue has no jira-id label, skipping",
+		if status == "Done" {
+			logging.Debug("jira ticket already closed, skipping",
 				"repository", repository,
-				"issue_number", issue.Number)
+				"issue_number", issue.Number,
+				"jira_ticket", jiraID)
 			continue
 		}
 
 		// Close the corresponding JIRA ticket
-		logging.Info("closing jira ticket for closed github issue",
+		logging.Info("closing JIRA ticket for closed GitHub issue",
 			"repository", repository,
 			"issue_number", issue.Number,
-			"jira_ticket", jiraID)
+			"jira_ticket", jiraID,
+			"current_status", status)
 
 		err = jiraClient.CloseTicket(jiraID)
 		if err != nil {
@@ -403,11 +445,18 @@ func syncClosedIssues(repository string, board string, githubClient *github.Clie
 			continue
 		}
 
-		logging.Info("successfully closed jira ticket",
+		logging.Info("successfully closed JIRA ticket",
 			"repository", repository,
 			"issue_number", issue.Number,
 			"jira_ticket", jiraID)
+
 		closeCount++
+	}
+
+	if closeCount > 0 {
+		logging.Info("closed jira tickets", "count", closeCount)
+	} else {
+		logging.Debug("no jira tickets needed closing")
 	}
 
 	return closeCount, nil
@@ -445,7 +494,7 @@ func parseChildIssues(description string, gitHubDomain string) []string {
 	return childLinks
 }
 
-func establishHierarchies(ctx context.Context, ghClient *github.Client, jiraClient *jira.Client, board string, issues []models.GitHubIssue) error {
+func establishHierarchies(ctx context.Context, ghClient *github.Client, jiraClient *jira.Client, repository string, board string, issues []models.GitHubIssue) error {
 	log := logging.GetLogger()
 
 	// Add counters for created and removed links
@@ -458,11 +507,32 @@ func establishHierarchies(ctx context.Context, ghClient *github.Client, jiraClie
 		return fmt.Errorf("failed to load config: %v", err)
 	}
 
-	// Create a map of GitHub issue numbers to JIRA IDs
+	// Get all issues (open and closed) for this board to build complete mapping
+	allIssues := make([]models.GitHubIssue, len(issues))
+	copy(allIssues, issues)
+
+	// Get closed issues for this board
+	closedIssues, err := ghClient.GetClosedIssuesWithLabels(repository, []string{board})
+	if err != nil {
+		log.Warn("failed to fetch closed issues for hierarchy mapping",
+			"error", err,
+			"board", board)
+	} else {
+		allIssues = append(allIssues, closedIssues...)
+		log.Debug("including closed issues in hierarchy mapping",
+			"open_count", len(issues),
+			"closed_count", len(closedIssues),
+			"total_count", len(allIssues))
+	}
+
+	// Create a map of GitHub issue numbers to JIRA IDs including closed issues
 	githubToJira := make(map[int]string)
-	for _, issue := range issues {
+	for _, issue := range allIssues {
 		if jiraID := parseJiraIDFromTitle(issue.Title); jiraID != "" {
 			githubToJira[issue.Number] = jiraID
+			log.Debug("mapped github issue to jira",
+				"github_number", issue.Number,
+				"jira_id", jiraID)
 		}
 	}
 
@@ -556,7 +626,8 @@ func establishHierarchies(ctx context.Context, ghClient *github.Client, jiraClie
 				log.Info("removing outdated parent-child link",
 					"parent", parentJiraID,
 					"child", childID,
-					"reason", "not in GitHub issues section")
+					"reason", "not in GitHub issues section",
+					"valid_children", validChildren)
 
 				err := jiraClient.DeleteIssueLink(parentJiraID, childID)
 				if err != nil {
@@ -567,10 +638,6 @@ func establishHierarchies(ctx context.Context, ghClient *github.Client, jiraClie
 				} else {
 					linksRemoved++
 				}
-			} else {
-				log.Debug("keeping existing link",
-					"parent", parentJiraID,
-					"child", childID)
 			}
 		}
 	}

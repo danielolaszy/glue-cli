@@ -531,3 +531,51 @@ func hasLabel(labels []string, targetLabel string) bool {
 	}
 	return false
 }
+
+// GetClosedIssuesWithLabels retrieves all closed issues with specified labels from a repository
+func (c *Client) GetClosedIssuesWithLabels(repository string, labels []string) ([]models.GitHubIssue, error) {
+	logging.Debug("searching for closed github issues with labels",
+		"repository", repository,
+		"labels", labels)
+
+	// Build the query for closed issues with labels
+	query := fmt.Sprintf("repo:%s is:issue is:closed", repository)
+	for _, label := range labels {
+		query += fmt.Sprintf(" label:%s", label)
+	}
+
+	// Get closed issues using the search API
+	issues, _, err := c.client.Search.Issues(context.Background(), query, &github.SearchOptions{
+		ListOptions: github.ListOptions{
+			PerPage: 100,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search closed issues: %v", err)
+	}
+
+	// Convert GitHub issues to our models
+	var filteredIssues []models.GitHubIssue
+	for _, issue := range issues.Issues {
+		// Extract labels
+		var labels []string
+		for _, label := range issue.Labels {
+			labels = append(labels, label.GetName())
+		}
+
+		// Convert to our model
+		filteredIssues = append(filteredIssues, models.GitHubIssue{
+			Number:      issue.GetNumber(),
+			Title:       issue.GetTitle(),
+			Description: issue.GetBody(),
+			Labels:      labels,
+			State:      issue.GetState(),
+		})
+	}
+
+	logging.Debug("filtered closed issues by labels",
+		"total_matching", len(filteredIssues),
+		"labels", labels)
+
+	return filteredIssues, nil
+}

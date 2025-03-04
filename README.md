@@ -1,123 +1,177 @@
-# Glue CLI
+# Glue
 
-Glue is a command-line tool that synchronizes GitHub issues with Jira.
+Glue is a CLI tool that synchronizes GitHub issues with JIRA tickets, maintaining relationships between features and their child stories. It helps teams that use both GitHub for development and JIRA for project management keep their work items synchronized.
+
+## Why Glue?
+
+Many development teams prefer GitHub's streamlined interface and integrated development workflows. However, organizations often require JIRA for:
+
+- **Software Capitalization**: Tracking development costs and capitalizing software development expenses for financial compliance
+- **Budget Tracking**: Managing development costs and resource allocation at an enterprise level
+- **Compliance**: Maintaining accurate records of development efforts for financial reporting and auditing
+
+Glue lets development teams continue working exclusively in GitHub while automatically keeping JIRA in sync. Instead of forcing developers to manually maintain two systems, Glue:
+
+- Allows teams to create and manage all issues in GitHub
+- Automatically creates and updates corresponding JIRA tickets
+- Maintains feature/story relationships across both systems
+- Syncs status changes (like closing issues) from GitHub to JIRA
+
+This means development teams can stay focused on GitHub's development experience while satisfying organizational requirements for JIRA-based tracking and reporting.
 
 ## Features
 
-- Synchronizes GitHub issues with Jira tickets
-- Routes issues to specific Jira boards using labels
+- Creates JIRA tickets from GitHub issues
+- Maintains parent-child relationships between features and stories
+- Synchronizes issue status (closed GitHub issues are reflected in JIRA)
+- Supports multiple JIRA boards/projects
+- Preserves existing relationships and only updates when necessary
+- Detailed logging for troubleshooting
+
+## Prerequisites
+
+### GitHub Repository Setup
+
+Your GitHub repository needs the following labels:
+
+- `feature`: Applied to issues that should be created as Features in JIRA
+- `story`: Applied to issues that should be created as Stories in JIRA
+- The JIRA project key(s) (e.g., `PROJ`, `TESTGCP`) as labels to indicate which JIRA project the issue belongs to
+
+### JIRA Project Setup
+
+Your JIRA project needs these issue types configured:
+
+- `Feature`: For parent/epic-level issues
+- `Story`: For child/task-level issues
+
+If the Story type isn't available, issues will default to the Feature type.
+
+### Authentication
+
+The tool requires authentication tokens for both GitHub and JIRA:
+
+1. GitHub Personal Access Token with `repo` scope
+2. JIRA API Token
+
+These should be configured in your environment:
+
+```bash
+export GITHUB_TOKEN=your_github_token
+export JIRA_TOKEN=your_jira_token
+export JIRA_USERNAME=your_jira_email
+export JIRA_URL=https://your-domain.atlassian.net
+```
 
 ## Installation
 
-### Prerequisites
-
-- Go 1.16 or higher
-- GitHub access token with repo scope
-- Jira access token
-
-### Building from source
-
 ```bash
-git clone https://github.com/yourusername/glue.git
-cd glue
-go build -o glue
-```
-
-### Environment variables
-
-The following environment variables are required:
-
-```bash
-# For GitHub integration
-export GITHUB_TOKEN=your_github_token
-
-# For JIRA integration
-export JIRA_URL=https://your-domain.atlassian.net
-export JIRA_USERNAME=your_email@example.com
-export JIRA_TOKEN=your_jira_api_token
+go install github.com/yourusername/glue@latest
 ```
 
 ## Usage
 
-### Prerequisites
-
-The Jira project board MUST have a 'Feature' 'Issue type' configured. Otherwise `glue` will not be able to create features.
-
-The GitHub repository must have labels configured.
-
-
-### Using labels to route issues to specific Jira boards
-
-A GitHub issue MUST have a `jira-project: BOARD_NAME` label to specify which Jira project board the issue should be created on. For example:
-
-- Add `jira-project: LEGGCP` to create the Jira ticket on the LEGGCP board
-- Add `jira-project: LEGAWS` to create the Jira ticket on the LEGAWS board
-
-Issues without a `jira-project:` label will be skipped during synchronization.
-
-### Synchronizing GitHub issues with Jira
-
-To synchronize all GitHub issues with Jira:
+### Basic Command
 
 ```bash
-glue jira --repository username/repo
+glue jira -r owner/repository -b PROJ1 [-b PROJ2 ...]
 ```
 
-This will:
+### Command Line Flags
 
-1. Find all GitHub issues with a `jira-project:` label
-2. Create Jira tickets on the specified boards if they don't already exist
-3. Add a `jira-id: PROJECT-123` label to each synchronized GitHub issue
+- `-r, --repository`: GitHub repository in the format `owner/repository` (required)
+- `-b, --board`: JIRA project key(s). Can be specified multiple times for multiple projects
 
-## Issue types
+### Debug Logging
 
-Issues are categorized based on their GitHub labels:
-- GitHub issues with a `type: feature` label will be created as "Feature" type in Jira
-- GitHub issues with a `type: story` label will be created as "Story" type in Jira
-- If no type label is present, they'll default to "Story" type
+Debug logging is controlled via the `LOG_LEVEL` environment variable:
 
-## Hierarchy Management
+```bash
+export LOG_LEVEL=debug
+glue jira -r owner/repo -b PROJ
+```
 
-`glue` supports creating and maintaining parent-child relationships between issues:
+### Examples
 
-### Creating and Updating Issue Hierarchies
+Sync with a single JIRA project:
+```bash
+glue jira -r myorg/myrepo -b PROJ
+```
 
-Feature GitHub issues can establish parent-child relationships with other GitHub issues by listing them in a `## Issues` section in the GitHub issue description:
+Sync with multiple JIRA projects:
+```bash
+glue jira -r myorg/myrepo -b PROJ1 -b PROJ2
+```
+
+## How It Works
+
+### Issue Creation
+
+1. The tool fetches all GitHub issues labeled with the specified JIRA project key(s)
+2. For each issue:
+   - If labeled with `feature`, creates a JIRA Feature
+   - If labeled with `story`, creates a JIRA Story
+   - Otherwise, defaults to creating a Story
+3. Updates the GitHub issue title with the JIRA ID: `[PROJ-123] Original Title`
+
+### Parent-Child Relationships
+
+Features can specify their child issues in the description using a `## Issues` section:
 
 ```markdown
-## Issues
+This is a feature description
 
-- https://github.example.com/owner/repo/issues/123
-- https://github.example.com/owner/repo/issues/124
+## Issues
+- https://github.com/owner/repo/issues/1
+- https://github.com/owner/repo/issues/2
 ```
 
-When syncing, `glue` will:
+The tool will:
+1. Parse the Issues section
+2. Create "relates to" relationships in JIRA between the feature and its stories
+3. Maintain these relationships over time, adding/removing as the Issues section changes
 
-1. Find all issues listed in the `## Issues` section
-2. Create corresponding links between parent and child issues in Jira
-3. Report the number of links created in the synchronization summary
+### Status Synchronization
 
-### Automatic Link Removal
+When GitHub issues are closed:
+1. The tool identifies corresponding JIRA tickets
+2. Moves them to "Done" status if not already closed
+3. Maintains parent-child relationships even for closed issues
 
-`glue` automatically detects when issues are removed from the `## Issues` section in GitHub:
+## Best Practices
 
-1. When a GitHub issue is removed from the `## Issues` section of a GitHub feature
-2. The next time synchronization runs, `glue` will detect this change
-3. The corresponding link in Jira will be automatically removed
-4. The synchronization will report both links created and links removed
+1. **Issue Organization**:
+   - Use the `feature` label for larger work items that will have child stories
+   - Use the `story` label for individual tasks
+   - Always include the JIRA project label (e.g., `PROJ`)
 
-This ensures that the issue hierarchy in Jira always matches what's defined in the GitHub issue descriptions.
+2. **Feature Management**:
+   - Maintain the `## Issues` section in feature descriptions
+   - List all related stories as GitHub issue links
+   - Keep the list updated as stories are added/removed
 
-## Automatic Status Synchronization
+3. **Synchronization**:
+   - Run the tool regularly (e.g., via CI/CD) to keep systems in sync
+   - Use debug logging when troubleshooting: `LOG_LEVEL=debug`
 
-`glue` automatically detects when GitHub issues are closed and updates the corresponding Jira tickets:
 
-1. When a GitHub issue with a `jira-id:` label is closed
-2. The next time synchronization runs, `glue` will detect the closed issue
-3. The corresponding Jira ticket will be automatically transitioned to "Done" or "Closed" status
-4. The synchronization will report the number of tickets closed
+### Debug Logging
 
-This ensures that the status of issues in JIRA stays in sync with their status in GitHub.
+Enable detailed logging for troubleshooting:
+```bash
+LOG_LEVEL=debug glue jira -r owner/repo -b PROJ
+```
 
-> [!WARNING]
-> `glue` does not re-open a JIRA ticket if a GitHub issue is re-opened.
+### Additional Features Not Mentioned in Current README
+
+1. **Fix Version Support**
+The code automatically assigns JIRA tickets to the current PI (Program Increment) version if available.
+
+2. **Feature Name Field**
+The code attempts to set a custom "Feature Name" field in JIRA if it exists.
+
+3. **Relationship Types**
+The code uses "Relates" type links in JIRA for parent-child relationships.
+
+4. **Retry Logic**
+Both GitHub and JIRA clients implement retry logic for authentication and API calls.
