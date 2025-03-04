@@ -21,19 +21,19 @@ func TestGitHubDomainToAPIURL(t *testing.T) {
 		wantURL  string
 	}{
 		{
-			name:     "Default GitHub.com",
+			name:     "Public GitHub.com",
 			domain:   "github.com",
 			wantURL:  "https://api.github.com/",
 		},
 		{
-			name:     "GitHub Enterprise",
+			name:     "Default GitHub Enterprise",
 			domain:   "github.example.com",
 			wantURL:  "https://github.example.com/api/v3/",
 		},
 		{
-			name:     "Empty Domain (should default to github.com)",
+			name:     "Empty Domain (should default to github.example.com)",
 			domain:   "",
-			wantURL:  "https://api.github.com/",
+			wantURL:  "https://github.example.com/api/v3/",
 		},
 	}
 
@@ -41,7 +41,7 @@ func TestGitHubDomainToAPIURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			domain := tt.domain
 			if domain == "" {
-				domain = "github.com"
+				domain = "github.example.com"
 			}
 
 			var apiURL string

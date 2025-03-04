@@ -57,7 +57,7 @@ func LoadConfig() (*Config, error) {
 
 	// Set default values if not provided
 	if config.GitHub.Domain == "" {
-		config.GitHub.Domain = "github.com"
+		config.GitHub.Domain = "github.example.com"
 	}
 
 	// Validate configuration

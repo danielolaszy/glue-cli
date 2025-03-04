@@ -175,3 +175,20 @@ The code uses "Relates" type links in JIRA for parent-child relationships.
 
 4. **Retry Logic**
 Both GitHub and JIRA clients implement retry logic for authentication and API calls.
+
+## Configuration
+
+The application is configured via environment variables:
+
+### GitHub Configuration
+
+- `GITHUB_DOMAIN` - The GitHub domain to use. Defaults to `github.example.com` (GitHub Enterprise).
+  - Use `github.com` for public GitHub
+  - For GitHub Enterprise, specify your custom domain (e.g., `github.mycompany.com`)
+- `GITHUB_TOKEN` - GitHub personal access token with appropriate permissions (required)
+
+### JIRA Configuration
+
+- `JIRA_URL` - The base URL of your JIRA instance (required)
+- `JIRA_USERNAME` - JIRA username for authentication (required)
+- `JIRA_TOKEN` - JIRA API token for authentication (required)

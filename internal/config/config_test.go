@@ -16,26 +16,26 @@ func TestLoadGitHubConfig(t *testing.T) {
 		wantErr  bool
 	}{
 		{
-			name:     "Explicit github.com",
+			name:     "Public GitHub",
 			domain:   "github.com",
 			token:    "test-token",
 			wantErr:  false,
 		},
 		{
-			name:     "Custom GitHub domain",
+			name:     "Custom GitHub Enterprise domain (explicit)",
 			domain:   "github.example.com",
 			token:    "test-token",
 			wantErr:  false,
 		},
 		{
-			name:     "Empty domain should default to github.com",
+			name:     "Empty domain should default to github.example.com",
 			domain:   "",
 			token:    "test-token",
 			wantErr:  false,
 		},
 		{
 			name:     "Missing token",
-			domain:   "github.com",
+			domain:   "github.example.com",
 			token:    "",
 			wantErr:  true,
 		},
@@ -60,7 +60,7 @@ func TestLoadGitHubConfig(t *testing.T) {
 				assert.NoError(t, err)
 				assert.NotNil(t, config)
 				if tt.domain == "" {
-					assert.Equal(t, "github.com", config.GitHub.Domain)
+					assert.Equal(t, "github.example.com", config.GitHub.Domain)
 				} else {
 					assert.Equal(t, tt.domain, config.GitHub.Domain)
 				}

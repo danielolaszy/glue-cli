@@ -6,7 +6,6 @@ import (
 
 	"fmt"
 	"net/http"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/danielolaszy/glue/pkg/models"
 	"github.com/google/go-github/v41/github"
 	"golang.org/x/oauth2"
+	"github.com/danielolaszy/glue/internal/config"
 )
 
 // Client encapsulates the GitHub API client and provides methods for interacting
@@ -27,14 +27,13 @@ type Client struct {
 }
 
 // NewClient creates a new GitHub client with authentication, retries, and an extended timeout.
-// It retrieves the GitHub token from the GITHUB_TOKEN environment variable,
-// tests the authentication by retrieving the current user, and returns a configured
-// client or an error if authentication fails.
+// It uses the provided configuration, tests the authentication by retrieving the current
+// user, and returns a configured client or an error if authentication fails.
 func NewClient() (*Client, error) {
-	// Get GitHub configuration
-	token := os.Getenv("GITHUB_TOKEN")
-	if token == "" {
-		return nil, fmt.Errorf("GITHUB_TOKEN environment variable is required")
+	// Load configuration
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load configuration: %v", err)
 	}
 
 	// Increase timeout to 30 seconds
@@ -46,11 +45,12 @@ func NewClient() (*Client, error) {
 	}
 
 	logging.Debug("initializing github client",
-		"token_length", len(token),
-		"token_prefix", token[:5]+"...") // Only log first 5 chars for security
+		"domain", cfg.GitHub.Domain,
+		"token_length", len(cfg.GitHub.Token),
+		"token_prefix", cfg.GitHub.Token[:5]+"...") // Only log first 5 chars for security
 
 	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: token},
+		&oauth2.Token{AccessToken: cfg.GitHub.Token},
 	)
 	// Use our custom httpClient as the base client
 	tc := oauth2.NewClient(ctx, ts)
@@ -61,7 +61,6 @@ func NewClient() (*Client, error) {
 	// Test authentication
 	maxRetries := 3
 	var user *github.User
-	var err error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		logging.Debug("testing github authentication",
