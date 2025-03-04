@@ -34,23 +34,23 @@ func NewClient() (*Client, error) {
 	
 	// Log the configuration
 	logging.Info("jira configuration",
-		"base_url", cfg.JiraURL,
-		"username", cfg.JiraUsername,
-		"token_length", len(cfg.JiraToken))
+		"base_url", cfg.Jira.BaseURL,
+		"username", cfg.Jira.Username,
+		"token_length", len(cfg.Jira.Token))
 	
 	// Validate required configuration
-	if cfg.JiraURL == "" || cfg.JiraUsername == "" || cfg.JiraToken == "" {
+	if cfg.Jira.BaseURL == "" || cfg.Jira.Username == "" || cfg.Jira.Token == "" {
 		return nil, errors.New("missing required JIRA configuration (JIRA_URL, JIRA_USERNAME, JIRA_TOKEN)")
 	}
 	
 	// Create transport for authentication
 	tp := jira.BasicAuthTransport{
-		Username: cfg.JiraUsername,
-		Password: cfg.JiraToken,
+		Username: cfg.Jira.Username,
+		Password: cfg.Jira.Token,
 	}
 	
 	// Create JIRA client
-	jiraClient, err := jira.NewClient(tp.Client(), cfg.JiraURL)
+	jiraClient, err := jira.NewClient(tp.Client(), cfg.Jira.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create JIRA client: %w", err)
 	}
@@ -58,44 +58,46 @@ func NewClient() (*Client, error) {
 	// Create client wrapper
 	client := &Client{
 		client: jiraClient,
+		issueTypeCache: make(map[string]map[string]string),
 	}
 	
 	// Test authentication with retries
-	authenticated := false
 	maxRetries := 3
+	var myself *jira.User
+	var resp *jira.Response
 	
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		_, _, err := jiraClient.User.GetSelf()
+		logging.Debug("testing jira authentication",
+			"attempt", attempt,
+			"max_attempts", maxRetries)
+			
+		myself, resp, err = jiraClient.User.GetSelf()
 		if err == nil {
-			authenticated = true
 			break
 		}
 		
 		statusCode := 0
-		if jiraErr, ok := err.(*jira.JiraError); ok {
-			statusCode = jiraErr.Status
+		if resp != nil {
+			statusCode = resp.StatusCode
 		}
 		
-		logging.Warn("jira authentication attempt failed, retrying...",
-			"attempt", attempt,
-			"error", err,
-			"status_code", statusCode)
-		
-		// Only retry if this is not the last attempt
 		if attempt < maxRetries {
-			time.Sleep(time.Duration(attempt) * time.Second)
+			logging.Warn("jira authentication attempt failed, retrying...",
+				"attempt", attempt,
+				"error", err,
+				"status_code", statusCode)
+			time.Sleep(time.Second * time.Duration(attempt))
 		} else {
-			// Log final error
 			logging.Error("all jira authentication attempts failed",
 				"attempts", maxRetries,
 				"final_error", err,
 				"final_status_code", statusCode)
+			return nil, fmt.Errorf("failed to authenticate with jira after %d attempts: %v", maxRetries, err)
 		}
 	}
 	
-	// If authentication failed, return client anyway (for testing)
-	// The caller can handle authentication errors
-	client.issueTypeCache = make(map[string]map[string]string)
+	logging.Info("jira authentication successful",
+		"username", myself.DisplayName)
 	
 	return client, nil
 }
