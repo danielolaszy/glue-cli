@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"net/url"
 
 	"github.com/danielolaszy/glue/internal/logging"
 	"github.com/danielolaszy/glue/pkg/models"
@@ -57,6 +58,18 @@ func NewClient() (*Client, error) {
 	tc.Timeout = httpClient.Timeout
 
 	client := github.NewClient(tc)
+
+	// Set the API URL based on domain for GitHub Enterprise
+	if cfg.GitHub.Domain != "github.com" {
+		enterpriseAPIURL := fmt.Sprintf("https://%s/api/v3/", cfg.GitHub.Domain)
+		baseURL, err := url.Parse(enterpriseAPIURL)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("invalid GitHub Enterprise URL: %v", err)
+		}
+		client.BaseURL = baseURL
+		logging.Debug("using GitHub Enterprise API URL", "url", enterpriseAPIURL)
+	}
 
 	// Test authentication
 	maxRetries := 3
