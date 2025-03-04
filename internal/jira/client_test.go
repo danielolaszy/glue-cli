@@ -9,6 +9,7 @@ import (
 	"github.com/andygrunwald/go-jira"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/golang/mock/gomock"
 )
 
 // Custom wrapper for testing specific scenarios
@@ -636,4 +637,133 @@ func TestIssueTypeExists(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateTicketWithTypeID(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_jira.NewMockJiraClient(ctrl)
+	client := &Client{client: mockClient}
+
+	issue := models.GitHubIssue{
+		Title:       "Test Issue",
+		Description: "Test Description",
+	}
+
+	// Mock the getFixVersion method
+	mockClient.EXPECT().
+		GetVersions("TEST").
+		Return([]jira.Version{
+			{ID: "10001", Name: "1.0.0"},
+		}, nil).
+		Times(1)
+
+	// Mock the FindField method for Feature Name
+	mockClient.EXPECT().
+		FindField("Feature Name").
+		Return(&jira.Field{ID: "customfield_10001", Schema: jira.FieldSchema{Type: "string"}}, nil).
+		Times(1)
+
+	// Mock the FindField method for Primary Feature Work Type
+	mockClient.EXPECT().
+		FindField("Primary Feature Work Type :").
+		Return(&jira.Field{ID: "customfield_10002", Schema: jira.FieldSchema{Type: "string"}}, nil).
+		Times(1)
+
+	// Mock the CreateIssue method
+	mockClient.EXPECT().
+		CreateIssue(gomock.Any()).
+		DoAndReturn(func(issue *jira.Issue) (*jira.Issue, error) {
+			// Verify that the issue has the expected fields
+			assert.Equal(t, "TEST", issue.Fields.Project.Key)
+			assert.Equal(t, "Test Issue", issue.Fields.Summary)
+			assert.Equal(t, "Test Description", issue.Fields.Description)
+			assert.Equal(t, "10001", issue.Fields.Type.ID)
+			
+			// Verify fix version
+			assert.Len(t, issue.Fields.FixVersions, 1)
+			assert.Equal(t, "10001", issue.Fields.FixVersions[0].ID)
+			
+			// Verify custom fields
+			assert.Equal(t, "Test Issue", issue.Fields.Unknowns["customfield_10001"])
+			assert.Equal(t, "Other Non-Application Development activities", issue.Fields.Unknowns["customfield_10002"])
+			
+			// Return a mock response
+			return &jira.Issue{
+				Key: "TEST-123",
+			}, nil
+		}).
+		Times(1)
+
+	// Call the method under test
+	ticketID, err := client.CreateTicketWithTypeID("TEST", issue, "10001")
+	assert.NoError(t, err)
+	assert.Equal(t, "TEST-123", ticketID)
+}
+
+func TestCreateTicketWithTypeIDNoCustomFields(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := mock_jira.NewMockJiraClient(ctrl)
+	client := &Client{client: mockClient}
+
+	issue := models.GitHubIssue{
+		Title:       "Test Issue",
+		Description: "Test Description",
+	}
+
+	// Mock the getFixVersion method
+	mockClient.EXPECT().
+		GetVersions("TEST").
+		Return([]jira.Version{
+			{ID: "10001", Name: "1.0.0"},
+		}, nil).
+		Times(1)
+
+	// Mock the FindField method for Feature Name to return an error
+	mockClient.EXPECT().
+		FindField("Feature Name").
+		Return(nil, errors.New("field not found")).
+		Times(1)
+
+	// Mock the FindField method for Primary Feature Work Type to return an error
+	mockClient.EXPECT().
+		FindField("Primary Feature Work Type :").
+		Return(nil, errors.New("field not found")).
+		Times(1)
+
+	// Mock the CreateIssue method
+	mockClient.EXPECT().
+		CreateIssue(gomock.Any()).
+		DoAndReturn(func(issue *jira.Issue) (*jira.Issue, error) {
+			// Verify that the issue has the expected fields
+			assert.Equal(t, "TEST", issue.Fields.Project.Key)
+			assert.Equal(t, "Test Issue", issue.Fields.Summary)
+			assert.Equal(t, "Test Description", issue.Fields.Description)
+			assert.Equal(t, "10001", issue.Fields.Type.ID)
+			
+			// Verify fix version
+			assert.Len(t, issue.Fields.FixVersions, 1)
+			assert.Equal(t, "10001", issue.Fields.FixVersions[0].ID)
+			
+			// Verify that the Unknowns map doesn't contain our custom fields
+			// Since the FindField calls returned errors, these fields should not be set
+			if issue.Fields.Unknowns != nil {
+				assert.NotContains(t, issue.Fields.Unknowns, "customfield_10001")
+				assert.NotContains(t, issue.Fields.Unknowns, "customfield_10002")
+			}
+			
+			// Return a mock response
+			return &jira.Issue{
+				Key: "TEST-123",
+			}, nil
+		}).
+		Times(1)
+
+	// Call the method under test
+	ticketID, err := client.CreateTicketWithTypeID("TEST", issue, "10001")
+	assert.NoError(t, err)
+	assert.Equal(t, "TEST-123", ticketID)
 }

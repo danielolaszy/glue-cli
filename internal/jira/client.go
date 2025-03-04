@@ -292,20 +292,36 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 			"version_id", fixVersion.ID)
 	}
 
+	// Initialize Unknowns map if it will be needed
+	issueFields.Unknowns = map[string]interface{}{}
+
 	// Try to get Feature Name field ID, but don't error if not found
 	featureNameField, fieldType, err := c.getCustomField("Feature Name")
 	if err != nil {
 		logging.Debug("Feature Name field not found, continuing without it", 
 			"error", err)
 	} else {
-		// Only add Feature Name field if we found the field ID
-		issueFields.Unknowns = map[string]interface{}{
-			featureNameField: issue.Title,
-		}
+		// Add Feature Name field if we found the field ID
+		issueFields.Unknowns[featureNameField] = issue.Title
 		logging.Debug("adding Feature Name field", 
 			"field_id", featureNameField,
 			"field_type", fieldType,
 			"value", issue.Title)
+	}
+
+	// Try to get Primary Feature Work Type field ID, but don't error if not found
+	workTypeField, workTypeFieldType, err := c.getCustomField("Primary Feature Work Type :")
+	if err != nil {
+		logging.Debug("Primary Feature Work Type field not found, continuing without it", 
+			"error", err)
+	} else {
+		// Add Primary Feature Work Type field with hardcoded value
+		const workTypeValue = "Other Non-Application Development activities"
+		issueFields.Unknowns[workTypeField] = workTypeValue
+		logging.Debug("adding Primary Feature Work Type field", 
+			"field_id", workTypeField,
+			"field_type", workTypeFieldType,
+			"value", workTypeValue)
 	}
 
 	// Create the issue
