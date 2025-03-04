@@ -23,6 +23,8 @@ type Client struct {
 	Token    string
 	// Cache for issue types by project key
 	issueTypeCache map[string]map[string]string // projectKey -> typeName -> typeID
+	// Cache for fix versions by project key
+	fixVersionCache map[string]*jira.FixVersion // projectKey -> fixVersion
 }
 
 // NewClient creates a new JIRA client with the provided configuration.
@@ -34,7 +36,7 @@ func NewClient() (*Client, error) {
 	}
 	
 	// Log the configuration
-	logging.Info("jira configuration",
+	logging.Info("jira configuration", 
 		"base_url", cfg.Jira.BaseURL,
 		"username", cfg.Jira.Username,
 		"token_length", len(cfg.Jira.Token))
@@ -43,25 +45,29 @@ func NewClient() (*Client, error) {
 	if cfg.Jira.BaseURL == "" || cfg.Jira.Username == "" || cfg.Jira.Token == "" {
 		return nil, errors.New("missing required JIRA configuration (JIRA_URL, JIRA_USERNAME, JIRA_TOKEN)")
 	}
-	
+
 	// Create transport for authentication
 	tp := jira.BasicAuthTransport{
 		Username: cfg.Jira.Username,
 		Password: cfg.Jira.Token,
 	}
-	
+
 	// Create JIRA client
 	jiraClient, err := jira.NewClient(tp.Client(), cfg.Jira.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create JIRA client: %w", err)
 	}
-	
+
 	// Create client wrapper
 	client := &Client{
+		BaseURL: cfg.Jira.BaseURL,
+		Username: cfg.Jira.Username,
+		Token: cfg.Jira.Token,
 		client: jiraClient,
 		issueTypeCache: make(map[string]map[string]string),
+		fixVersionCache: make(map[string]*jira.FixVersion),
 	}
-	
+
 	// Test authentication with retries
 	maxRetries := 3
 	var authError error
@@ -76,8 +82,8 @@ func NewClient() (*Client, error) {
 		
 		authError = err  // Store the last error
 		
-		logging.Warn("jira authentication attempt failed, retrying...",
-			"attempt", attempt,
+		logging.Warn("jira authentication attempt failed, retrying...", 
+			"attempt", attempt, 
 			"error", err)
 		
 		// Only retry if this is not the last attempt
@@ -85,7 +91,7 @@ func NewClient() (*Client, error) {
 			time.Sleep(time.Duration(attempt) * time.Second)
 		} else {
 			// Log final error
-			logging.Error("all jira authentication attempts failed",
+			logging.Error("all jira authentication attempts failed", 
 				"attempts", maxRetries,
 				"final_error", err)
 		}
@@ -695,6 +701,16 @@ func (c *Client) GetProjectVersions(projectKey string) ([]jira.Version, error) {
 func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, error) {
 	logging.Debug("getting default fix version", "project", projectKey)
 
+	// Check if we already have this project's fix version in cache
+	if fixVersion, exists := c.fixVersionCache[projectKey]; exists {
+		if fixVersion == nil {
+			logging.Info("no suitable fix version found in cache for project", "project", projectKey)
+		} else {
+			logging.Info("found fix version in cache", "project", projectKey, "version", fixVersion.Name, "id", fixVersion.ID)
+		}
+		return fixVersion, nil
+	}
+
 	versions, err := c.GetProjectVersions(projectKey)
 	if err != nil {
 		logging.Error("failed to get project versions", "error", err)
@@ -889,16 +905,21 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 			"released", released,
 			"archived", archived)
 
-		return &jira.FixVersion{
+		fixVersion := &jira.FixVersion{
 			ID:          selectedPI.version.ID,
 			Name:        selectedPI.version.Name,
 			Description: selectedPI.version.Description,
 			Released:    releasedPtr,
 			Archived:    archivedPtr,
-		}, nil
+		}
+
+		c.fixVersionCache[projectKey] = fixVersion
+		return fixVersion, nil
 	}
 
 	logging.Info("no suitable fix version found")
+	// Cache the nil result to avoid repeated lookups
+	c.fixVersionCache[projectKey] = nil
 	return nil, nil
 }
 

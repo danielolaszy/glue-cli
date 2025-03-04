@@ -742,6 +742,44 @@ func TestFixVersionSelection(t *testing.T) {
 	t.Logf("Selected version: %s (ID: %s)", selectedVersion.Name, selectedVersion.ID)
 }
 
+// TestFixVersionCaching tests the caching mechanism for fix versions
+func TestFixVersionCaching(t *testing.T) {
+	// Create a test client
+	client := &Client{
+		fixVersionCache: make(map[string]*jira.FixVersion),
+	}
+	
+	// Create a test fix version
+	testVersion := &jira.FixVersion{
+		ID:   "123",
+		Name: "PI 25.1",
+	}
+	
+	// Cache the version for a test project
+	projectKey := "TEST"
+	client.fixVersionCache[projectKey] = testVersion
+	
+	// Retrieve it from cache
+	cachedVersion, err := client.GetDefaultFixVersion(projectKey)
+	
+	// Verify the cache hit
+	assert.NoError(t, err)
+	assert.Equal(t, testVersion, cachedVersion)
+	assert.Equal(t, "123", cachedVersion.ID)
+	assert.Equal(t, "PI 25.1", cachedVersion.Name)
+	
+	// Test caching nil values
+	nilProjectKey := "EMPTY"
+	client.fixVersionCache[nilProjectKey] = nil
+	
+	// Retrieve the nil value from cache
+	nilVersion, err := client.GetDefaultFixVersion(nilProjectKey)
+	
+	// Verify the nil cache hit
+	assert.NoError(t, err)
+	assert.Nil(t, nilVersion)
+}
+
 // testJiraClient is a test implementation of the JIRA client
 type testJiraClient struct {
 	Client   // Embed the real client
