@@ -707,30 +707,41 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 
 	logging.Debug("found project versions", "count", len(versions))
 
+	// Get current year's last two digits to use as major version
+	currentYear := time.Now().Year()
+	targetMajor := currentYear % 100
+	logging.Debug("looking for current PI version", "year", currentYear, "target_major", targetMajor)
+
 	type piVersion struct {
 		major    int
 		minor    int
 		version  *jira.Version
 		released bool
 		archived bool
-		piNumber int  // Combined PI number (major*100 + minor) for easy comparison
 	}
 
-	var piVersions []*piVersion
+	// Find all versions matching the current year's PI
+	var currentYearVersions []*piVersion
+	var otherPIVersions []*piVersion
 	
-	// Parse and store PI versions
+	// First pass: collect all PI versions for the current year and other years
 	for i := range versions {
 		version := &versions[i]
+		
+		// Log all versions for visibility
+		logging.Debug("examining version", 
+			"name", version.Name, 
+			"id", version.ID,
+			"released", version.Released != nil && *version.Released,
+			"archived", version.Archived != nil && *version.Archived)
 		
 		// Check if version is released or archived
 		released := version.Released != nil && *version.Released
 		archived := version.Archived != nil && *version.Archived
 		
-		// Skip archived versions as requested
+		// Skip archived versions
 		if archived {
-			logging.Debug("skipping archived version",
-				"name", version.Name,
-				"archived", archived)
+			logging.Debug("skipping archived version", "name", version.Name, "archived", archived)
 			continue
 		}
 		
@@ -738,46 +749,127 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 		var major, minor int
 		_, err := fmt.Sscanf(version.Name, "PI %d.%d", &major, &minor)
 		if err != nil {
-			logging.Debug("skipping non-PI version", "name", version.Name)
+			logging.Debug("skipping non-PI version", "name", version.Name, "error", err)
 			continue
 		}
 
-		piNumber := major*100 + minor
-		
 		pv := &piVersion{
 			major:    major,
 			minor:    minor,
 			version:  version,
 			released: released,
 			archived: archived,
-			piNumber: piNumber,
 		}
 		
-		logging.Debug("found PI version",
-			"name", version.Name,
-			"major", major,
-			"minor", minor,
-			"pi_number", piNumber,
-			"released", released)
-			
-		piVersions = append(piVersions, pv)
+		// Categorize by whether it matches the current year
+		if major == targetMajor {
+			logging.Debug("found current year PI version", 
+				"name", version.Name, 
+				"major", major, 
+				"minor", minor, 
+				"released", released)
+			currentYearVersions = append(currentYearVersions, pv)
+		} else {
+			logging.Debug("found other year PI version", 
+				"name", version.Name, 
+				"major", major, 
+				"minor", minor, 
+				"released", released)
+			otherPIVersions = append(otherPIVersions, pv)
+		}
 	}
 	
-	// Sort PI versions: unreleased first, then by PI number (higher is more recent)
-	sort.Slice(piVersions, func(i, j int) bool {
-		// First prefer unreleased versions
-		if piVersions[i].released != piVersions[j].released {
-			return !piVersions[i].released
+	logging.Debug("version summary",
+		"current_year_versions_count", len(currentYearVersions),
+		"other_year_versions_count", len(otherPIVersions))
+	
+	// Find the appropriate version to use
+	var selectedPI *piVersion
+	
+	// First priority: Current year's PI with the lowest minor version
+	if len(currentYearVersions) > 0 {
+		// Log all current year versions for clarity
+		for i, v := range currentYearVersions {
+			logging.Debug("current year PI version", 
+				"index", i,
+				"name", v.version.Name,
+				"major", v.major,
+				"minor", v.minor,
+				"released", v.released)
 		}
 		
-		// Then sort by PI number (higher is more recent)
-		return piVersions[i].piNumber > piVersions[j].piNumber
-	})
-	
-	// Select the best version
-	var selectedPI *piVersion
-	if len(piVersions) > 0 {
-		selectedPI = piVersions[0]
+		// Sort by minor version (ascending)
+		sort.Slice(currentYearVersions, func(i, j int) bool {
+			// Sort by released status first (unreleased first)
+			if currentYearVersions[i].released != currentYearVersions[j].released {
+				return !currentYearVersions[i].released
+			}
+			// Then by minor version (lowest first)
+			return currentYearVersions[i].minor < currentYearVersions[j].minor
+		})
+		
+		// Log the sorted versions
+		logging.Debug("sorted current year PI versions (unreleased first, then by lowest minor)")
+		for i, v := range currentYearVersions {
+			logging.Debug("sorted current year PI version", 
+				"index", i,
+				"name", v.version.Name,
+				"major", v.major,
+				"minor", v.minor,
+				"released", v.released)
+		}
+		
+		selectedPI = currentYearVersions[0]
+		logging.Debug("selected current year PI version", 
+			"name", selectedPI.version.Name,
+			"major", selectedPI.major,
+			"minor", selectedPI.minor,
+			"released", selectedPI.released)
+	} else if len(otherPIVersions) > 0 {
+		// If no current year PI found, use the most recent from other years
+		// Log all other year versions for clarity
+		for i, v := range otherPIVersions {
+			logging.Debug("other year PI version", 
+				"index", i,
+				"name", v.version.Name,
+				"major", v.major,
+				"minor", v.minor,
+				"released", v.released)
+		}
+		
+		// Sort by major (descending) then minor (ascending)
+		sort.Slice(otherPIVersions, func(i, j int) bool {
+			// First by major version (highest first)
+			if otherPIVersions[i].major != otherPIVersions[j].major {
+				return otherPIVersions[i].major > otherPIVersions[j].major
+			}
+			// Then by released status (unreleased first)
+			if otherPIVersions[i].released != otherPIVersions[j].released {
+				return !otherPIVersions[i].released
+			}
+			// Then by minor version (lowest first)
+			return otherPIVersions[i].minor < otherPIVersions[j].minor
+		})
+		
+		// Log the sorted versions
+		logging.Debug("sorted other year PI versions (highest major first, unreleased first, then by lowest minor)")
+		for i, v := range otherPIVersions {
+			logging.Debug("sorted other year PI version", 
+				"index", i,
+				"name", v.version.Name,
+				"major", v.major,
+				"minor", v.minor,
+				"released", v.released)
+		}
+		
+		selectedPI = otherPIVersions[0]
+		logging.Debug("selected other year PI version as fallback", 
+			"name", selectedPI.version.Name,
+			"major", selectedPI.major,
+			"minor", selectedPI.minor,
+			"released", selectedPI.released)
+	} else {
+		logging.Debug("no PI versions found at all")
 	}
 
 	// Convert Version to FixVersion
@@ -798,7 +890,6 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 			"id", selectedPI.version.ID,
 			"major", selectedPI.major,
 			"minor", selectedPI.minor,
-			"pi_number", selectedPI.piNumber,
 			"released", released,
 			"archived", archived)
 
