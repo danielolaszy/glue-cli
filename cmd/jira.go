@@ -423,8 +423,7 @@ func parseChildIssues(description string, gitHubDomain string) []string {
 		return childLinks
 	}
 
-	logging.Debug("found '## issues' section", 
-		"content", issuesSection)
+	logging.Debug("found '## issues' section")
 
 	// Extract GitHub issue numbers using regex
 	escapedDomain := regexp.QuoteMeta(gitHubDomain)

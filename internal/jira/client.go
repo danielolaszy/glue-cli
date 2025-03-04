@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	jira "github.com/andygrunwald/go-jira"
 	"github.com/danielolaszy/glue/internal/logging"
@@ -58,27 +59,55 @@ func NewClient() (*Client, error) {
 		Password: jiraToken,
 	}
 
-	// Create JIRA client
-	client, err := jira.NewClient(tp.Client(), jiraURL)
+	// Create HTTP client with timeout
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &tp,
+	}
+
+	// Create JIRA client with our custom HTTP client
+	client, err := jira.NewClient(httpClient, jiraURL)
 	if err != nil {
 		logging.Error("failed to create jira client", "error", err)
 		return nil, fmt.Errorf("error creating jira client: %v", err)
 	}
 
-	// Test the connection
-	myself, resp, err := client.User.GetSelf()
-	if err != nil {
+	// Test authentication with retries
+	maxRetries := 3
+	var myself *jira.User
+	var resp *jira.Response
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		logging.Debug("testing jira authentication",
+			"attempt", attempt,
+			"max_attempts", maxRetries)
+
+		myself, resp, err = client.User.GetSelf()
+		if err == nil {
+			break
+		}
+
 		statusCode := 0
 		if resp != nil {
 			statusCode = resp.StatusCode
 		}
-		logging.Error("failed to test jira connection", 
-			"error", err,
-			"status_code", statusCode)
-		return nil, fmt.Errorf("error testing jira connection: %v", err)
+
+		if attempt < maxRetries {
+			logging.Warn("jira authentication attempt failed, retrying...",
+				"attempt", attempt,
+				"error", err,
+				"status_code", statusCode)
+			time.Sleep(time.Second * time.Duration(attempt))
+		} else {
+			logging.Error("all jira authentication attempts failed",
+				"attempts", maxRetries,
+				"final_error", err,
+				"final_status_code", statusCode)
+			return nil, fmt.Errorf("failed to authenticate with jira after %d attempts: %v", maxRetries, err)
+		}
 	}
 
-	logging.Info("jira authentication successful", 
+	logging.Info("jira authentication successful",
 		"username", myself.DisplayName)
 
 	return &Client{

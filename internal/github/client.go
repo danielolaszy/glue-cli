@@ -60,7 +60,8 @@ func NewClient() (*Client, error) {
 	
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		logging.Debug("testing github authentication",
-			"attempt", attempt)
+			"attempt", attempt,
+			"max_retries", maxRetries)
 		
 		user, _, err = client.Users.Get(ctx, "")
 		if err == nil {
