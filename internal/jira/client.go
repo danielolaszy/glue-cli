@@ -288,20 +288,16 @@ func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIs
 			"value", issue.Title)
 	}
 
-	// Try to get Primary Feature Work Type field ID, but don't error if not found
-	workTypeField, workTypeFieldType, err := c.getCustomField("Primary Feature Work Type :")
-	if err != nil {
-		logging.Debug("Primary Feature Work Type field not found, continuing without it", 
-			"error", err)
-	} else {
-		// Add Primary Feature Work Type field with hardcoded value
-		const workTypeValue = "Other Non-Application Development activities"
-		issueFields.Unknowns[workTypeField] = workTypeValue
-		logging.Debug("adding Primary Feature Work Type field", 
-			"field_id", workTypeField,
-			"field_type", workTypeFieldType,
-			"value", workTypeValue)
-	}
+	// For the Primary Feature Work Type field, we'll hardcode both the ID and value
+	// Hardcoded field ID for "Primary Feature Work Type :"
+	const primaryFeatureWorkTypeFieldID = "customfield_13404"
+	const workTypeValue = "Other Non-Application Development activities"
+	
+	// Add the hardcoded field to the issue
+	issueFields.Unknowns[primaryFeatureWorkTypeFieldID] = workTypeValue
+	logging.Debug("adding hardcoded Primary Feature Work Type field", 
+		"field_id", primaryFeatureWorkTypeFieldID,
+		"value", workTypeValue)
 
 	// Create the issue
 	newIssue := &jira.Issue{
