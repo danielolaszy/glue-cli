@@ -4,7 +4,7 @@ package jira
 import (
 	"fmt"
 	"net/http"
-	"os"
+	"errors"
 	"strings"
 	"time"
 
@@ -62,25 +62,22 @@ func NewClient() (*Client, error) {
 	}
 	
 	// Test authentication with retries
-	authenticated := false
 	maxRetries := 3
+	var authError error
 	
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		_, _, err := jiraClient.User.GetSelf()
 		if err == nil {
-			authenticated = true
-			break
+			// Authentication successful
+			logging.Info("jira authentication successful")
+			return client, nil
 		}
 		
-		statusCode := 0
-		if jiraErr, ok := err.(*jira.JiraError); ok {
-			statusCode = jiraErr.Status
-		}
+		authError = err  // Store the last error
 		
 		logging.Warn("jira authentication attempt failed, retrying...",
 			"attempt", attempt,
-			"error", err,
-			"status_code", statusCode)
+			"error", err)
 		
 		// Only retry if this is not the last attempt
 		if attempt < maxRetries {
@@ -89,15 +86,12 @@ func NewClient() (*Client, error) {
 			// Log final error
 			logging.Error("all jira authentication attempts failed",
 				"attempts", maxRetries,
-				"final_error", err,
-				"final_status_code", statusCode)
+				"final_error", err)
 		}
 	}
 	
-	// If authentication failed, return client anyway (for testing)
-	// The caller can handle authentication errors
-	
-	return client, nil
+	// If authentication failed, return error
+	return nil, fmt.Errorf("failed to authenticate with JIRA: %w", authError)
 }
 
 // GetTotalTickets returns the total number of tickets in a JIRA project by executing
