@@ -1,45 +1,49 @@
 package github
 
 import (
+	"fmt"
 	"net/url"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
+	"github.com/google/go-github/v41/github"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestGitHubDomainToAPIURL tests the logic that converts a domain to an API URL
 // This is a unit test focusing just on the URL construction logic
 func TestGitHubDomainToAPIURL(t *testing.T) {
-	testCases := []struct {
-		name           string
-		domain         string
-		expectedAPIURL string
+	tests := []struct {
+		name     string
+		domain   string
+		wantURL  string
 	}{
 		{
-			name:           "Default GitHub.com",
-			domain:         "github.com",
-			expectedAPIURL: "https://api.github.com/",
+			name:     "Default GitHub.com",
+			domain:   "github.com",
+			wantURL:  "https://api.github.com/",
 		},
 		{
-			name:           "GitHub Enterprise",
-			domain:         "github.example.com",
-			expectedAPIURL: "https://github.example.com/api/v3/",
+			name:     "GitHub Enterprise",
+			domain:   "github.example.com",
+			wantURL:  "https://github.example.com/api/v3/",
 		},
 		{
-			name:           "Empty Domain (should default to github.com)",
-			domain:         "",
-			expectedAPIURL: "https://api.github.com/",
+			name:     "Empty Domain (should default to github.com)",
+			domain:   "",
+			wantURL:  "https://api.github.com/",
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Get the domain from test case, defaulting to github.com if empty
-			domain := tc.domain
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			domain := tt.domain
 			if domain == "" {
 				domain = "github.com"
 			}
 
-			// Construct API URL based on domain using the same logic as in the client
 			var apiURL string
 			if domain == "github.com" {
 				apiURL = "https://api.github.com/"
@@ -47,20 +51,11 @@ func TestGitHubDomainToAPIURL(t *testing.T) {
 				apiURL = "https://" + domain + "/api/v3/"
 			}
 
-			// Verify URL matches expected
-			if apiURL != tc.expectedAPIURL {
-				t.Errorf("Expected API URL %s, got %s", tc.expectedAPIURL, apiURL)
-			}
+			assert.Equal(t, tt.wantURL, apiURL)
 
-			// Also test URL parsing to ensure the URLs are valid
 			parsedURL, err := url.Parse(apiURL)
-			if err != nil {
-				t.Errorf("Failed to parse URL %s: %v", apiURL, err)
-			}
-
-			if parsedURL.String() != apiURL {
-				t.Errorf("URL parsing changed the URL from %s to %s", apiURL, parsedURL.String())
-			}
+			require.NoError(t, err)
+			assert.Equal(t, apiURL, parsedURL.String())
 		})
 	}
 }
@@ -151,4 +146,209 @@ func TestGetClosedIssuesValidation(t *testing.T) {
 	if err != nil && !strings.Contains(err.Error(), "invalid repository format") {
 		t.Errorf("Expected 'invalid repository format' error, got: %v", err)
 	}
+}
+
+func TestNewClient(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVars map[string]string
+		wantErr bool
+	}{
+		{
+			name: "All required env vars present but invalid token",
+			envVars: map[string]string{
+				"GITHUB_TOKEN": "invalid_token",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Save original env vars
+			origToken := os.Getenv("GITHUB_TOKEN")
+
+			// Set test env vars
+			for k, v := range tt.envVars {
+				require.NoError(t, os.Setenv(k, v))
+			}
+
+			// Run test
+			_, err := NewClient()
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			// Restore original env vars
+			require.NoError(t, os.Setenv("GITHUB_TOKEN", origToken))
+		})
+	}
+}
+
+func validateRepository(repo string) error {
+	if repo == "" {
+		return fmt.Errorf("repository cannot be empty")
+	}
+	if !strings.Contains(repo, "/") {
+		return fmt.Errorf("invalid repository format")
+	}
+	return nil
+}
+
+func TestGetIssuesWithLabels(t *testing.T) {
+	tests := []struct {
+		name       string
+		repo       string
+		labels     []string
+		wantIssues []*github.Issue
+		wantErr    bool
+	}{
+		{
+			name:       "Invalid repository format",
+			repo:       "invalid-repo",
+			labels:     []string{"bug"},
+			wantIssues: nil,
+			wantErr:    true,
+		},
+		{
+			name:       "Empty repository",
+			repo:       "",
+			labels:     []string{"bug"},
+			wantIssues: nil,
+			wantErr:    true,
+		},
+		{
+			name:       "Empty labels",
+			repo:       "owner/repo",
+			labels:     []string{},
+			wantIssues: nil,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &Client{
+				client: github.NewClient(nil),
+			}
+			
+			issues, err := client.GetIssuesWithLabels(tt.repo, tt.labels)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, issues)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantIssues, issues)
+			}
+		})
+	}
+}
+
+func TestHasLabelMatching(t *testing.T) {
+	pattern := regexp.MustCompile("bug.*")
+	tests := []struct {
+		name       string
+		client     *Client
+		repo       string
+		issueNum   int
+		pattern    *regexp.Regexp
+		wantResult bool
+		wantErr    bool
+	}{
+		{
+			name:       "Invalid repository format",
+			client:     &Client{},
+			repo:       "invalid-repo",
+			issueNum:   1,
+			pattern:    pattern,
+			wantResult: false,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := tt.client.HasLabelMatching(tt.repo, tt.issueNum, tt.pattern)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.False(t, result)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantResult, result)
+			}
+		})
+	}
+}
+
+func TestGetClosedIssuesWithLabels(t *testing.T) {
+	tests := []struct {
+		name       string
+		repo       string
+		labels     []string
+		wantIssues []*github.Issue
+		wantErr    bool
+	}{
+		{
+			name:       "Invalid repository format",
+			repo:       "invalid-repo",
+			labels:     []string{"bug"},
+			wantIssues: nil,
+			wantErr:    true,
+		},
+		{
+			name:       "Empty repository",
+			repo:       "",
+			labels:     []string{"bug"},
+			wantIssues: nil,
+			wantErr:    true,
+		},
+		{
+			name:       "Empty labels",
+			repo:       "owner/repo",
+			labels:     []string{},
+			wantIssues: nil,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Initialize client with a non-nil GitHub client
+			client := &Client{
+				client: github.NewClient(nil),
+			}
+			
+			issues, err := client.GetClosedIssuesWithLabels(tt.repo, tt.labels)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, issues)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantIssues, issues)
+			}
+		})
+	}
+}
+
+// Helper functions
+func createTestLabels(names []string) []*github.Label {
+	labels := make([]*github.Label, len(names))
+	for i, name := range names {
+		labels[i] = &github.Label{Name: &name}
+	}
+	return labels
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

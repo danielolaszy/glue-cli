@@ -443,6 +443,8 @@ func (c *Client) CheckParentChildLinkExists(parentKey, childKey string) (bool, e
 }
 
 // GetIssueLinkID retrieves the ID of the link between two JIRA issues.
+// It checks both the parent and child issues for links connecting them,
+// and returns the link ID if found or an error if the retrieval fails.
 func (c *Client) GetIssueLinkID(parentKey, childKey string) (string, error) {
 	logging.Debug("finding issue link ID in JIRA",
 		"parent", parentKey,
@@ -813,7 +815,9 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 	return nil, nil
 }
 
-// GetChildIssues returns the JIRA IDs of all child issues for a given parent
+// GetChildIssues retrieves all subtask issues directly associated with a given parent issue.
+// It takes a parentID string representing the JIRA issue key (e.g., "PROJECT-123") and returns
+// a slice of child issue keys or an error if the retrieval fails.
 func (c *Client) GetChildIssues(parentID string) ([]string, error) {
 	issue, _, err := c.client.Issue.Get(parentID, nil)
 	if err != nil {
@@ -829,7 +833,10 @@ func (c *Client) GetChildIssues(parentID string) ([]string, error) {
 	return children, nil
 }
 
-// GetIssueLinks returns a map of child JIRA IDs that are linked to the parent
+// GetIssueLinks retrieves all issues linked to the specified JIRA issue, regardless of link type.
+// It takes an issueID string representing the JIRA issue key (e.g., "PROJECT-123") and returns
+// a map where keys are the linked issue keys and values are always true, or an error if the 
+// retrieval fails. The map acts as a set of unique linked issue keys.
 func (c *Client) GetIssueLinks(issueID string) (map[string]bool, error) {
 	logging.Debug("getting issue links", "issue", issueID)
 	
@@ -865,7 +872,9 @@ func (c *Client) GetIssueLinks(issueID string) (map[string]bool, error) {
 	return children, nil
 }
 
-// GetTicketStatus retrieves the current status of a JIRA ticket
+// GetTicketStatus retrieves the current status of a JIRA ticket.
+// It takes an issueID string representing the JIRA issue key (e.g., "PROJECT-123") and returns
+// the status name as a string (e.g., "In Progress", "Done") or an error if the retrieval fails.
 func (c *Client) GetTicketStatus(issueID string) (string, error) {
 	if c.client == nil {
 		return "", fmt.Errorf("jira client not initialized")

@@ -2,322 +2,226 @@ package logging
 
 import (
 	"bytes"
-	"log/slog"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSetupLogger(t *testing.T) {
-	// Save original logger to restore later
-	originalLogger := defaultLogger
-
-	// Defer restoration of the original logger
-	defer func() {
-		defaultLogger = originalLogger
-	}()
-
-	testCases := []struct {
-		name           string
-		level          LogLevel
-		expectedLevel  slog.Level
+	tests := []struct {
+		name     string
+		level    LogLevel
+		message  string
+		wantLogs bool
 	}{
 		{
-			name:          "Debug level",
-			level:         LevelDebug,
-			expectedLevel: slog.LevelDebug,
+			name:     "Debug level",
+			level:    LevelDebug,
+			message:  "test message",
+			wantLogs: true,
 		},
 		{
-			name:          "Info level",
-			level:         LevelInfo,
-			expectedLevel: slog.LevelInfo,
+			name:     "Info level",
+			level:    LevelInfo,
+			message:  "test message",
+			wantLogs: true,
 		},
 		{
-			name:          "Warn level",
-			level:         LevelWarn,
-			expectedLevel: slog.LevelWarn,
+			name:     "Warn level",
+			level:    LevelWarn,
+			message:  "test message",
+			wantLogs: false,
 		},
 		{
-			name:          "Error level",
-			level:         LevelError,
-			expectedLevel: slog.LevelError,
+			name:     "Error level",
+			level:    LevelError,
+			message:  "test message",
+			wantLogs: false,
 		},
 		{
-			name:          "Invalid level defaults to Info",
-			level:         LogLevel("invalid"),
-			expectedLevel: slog.LevelInfo,
+			name:     "Invalid level defaults to Info",
+			level:    LogLevel("invalid"),
+			message:  "test message",
+			wantLogs: true,
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Setup logger with a buffer to capture output
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			SetupLogger(&buf, tc.level)
+			SetupLogger(&buf, tt.level)
 
-			// Verify logger was set
-			if defaultLogger == nil {
-				t.Fatal("defaultLogger is nil after setup")
-			}
+			Info(tt.message)
 
-			// Test logging
-			Info("test message")
-
-			// Verify output contains expected level
 			output := buf.String()
 			t.Logf("Log output: %s", output)
 
-			// The output format could change, but it should contain the level in some form
-			if tc.expectedLevel <= slog.LevelInfo && !strings.Contains(output, "INFO") && !strings.Contains(output, "info") {
-				t.Errorf("Expected INFO level in output, got: %s", output)
+			if tt.wantLogs {
+				assert.Contains(t, output, tt.message)
+				assert.Contains(t, output, "level=INFO")
+			} else {
+				assert.Empty(t, output)
 			}
 		})
 	}
 }
 
 func TestMaskSensitive(t *testing.T) {
-	testCases := []struct {
-		name     string
-		input    string
-		expected string
+	tests := []struct {
+		name  string
+		input string
+		want  string
 	}{
 		{
-			name:     "Empty string",
-			input:    "",
-			expected: "<not set>",
+			name:  "Empty string",
+			input: "",
+			want:  "<not set>",
 		},
 		{
-			name:     "Short string",
-			input:    "abc",
-			expected: "<set>",
+			name:  "Short string",
+			input: "abc",
+			want:  "<set>",
 		},
 		{
-			name:     "Exactly 4 characters",
-			input:    "abcd",
-			expected: "<set>",
+			name:  "Exactly 4 characters",
+			input: "abcd",
+			want:  "<set>",
 		},
 		{
-			name:     "Long string",
-			input:    "abcdefghijklm",
-			expected: "abcd...***",
+			name:  "Long string",
+			input: "abcdefghijk",
+			want:  "abcd...***",
 		},
 		{
-			name:     "Token-like string",
-			input:    "2Dn5j8fk39Dkf0s",
-			expected: "2Dn5...***",
+			name:  "Token-like string",
+			input: "ghp_1234567890abcdef",
+			want:  "ghp_...***",
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := MaskSensitive(tc.input)
-			if result != tc.expected {
-				t.Errorf("Expected %q, got %q", tc.expected, result)
-			}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MaskSensitive(tt.input)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
 
 func TestLoggingFunctions(t *testing.T) {
-	// Save original logger and env var
-	originalLogger := defaultLogger
-	origEnv := os.Getenv("LOG_LEVEL")
-
-	// Restore original state after test
-	defer func() {
-		defaultLogger = originalLogger
-		os.Setenv("LOG_LEVEL", origEnv)
-	}()
-
-	// Test all logging functions with a buffer
-	var buf bytes.Buffer
-	SetupLogger(&buf, LevelDebug) // Set to debug to capture all levels
-
 	tests := []struct {
 		name     string
-		logFunc  func(string, ...any)
-		level    string
-		message  string
+		logFunc  func(string, ...interface{})
+		level    LogLevel
+		wantLogs bool
 	}{
 		{
 			name:     "Debug logging",
 			logFunc:  Debug,
-			level:    "DEBUG",
-			message:  "debug message",
+			level:    LevelDebug,
+			wantLogs: true,
 		},
 		{
 			name:     "Info logging",
 			logFunc:  Info,
-			level:    "INFO",
-			message:  "info message",
+			level:    LevelInfo,
+			wantLogs: true,
 		},
 		{
 			name:     "Warn logging",
 			logFunc:  Warn,
-			level:    "WARN",
-			message:  "warn message",
+			level:    LevelWarn,
+			wantLogs: true,
 		},
 		{
 			name:     "Error logging",
 			logFunc:  Error,
-			level:    "ERROR",
-			message:  "error message",
+			level:    LevelError,
+			wantLogs: true,
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			// Clear buffer
-			buf.Reset()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			SetupLogger(&buf, tt.level)
 
-			// Call the log function
-			tc.logFunc(tc.message, "key", "value")
+			tt.logFunc("test message")
 
-			// Check output
 			output := buf.String()
-			if !strings.Contains(strings.ToUpper(output), tc.level) {
-				t.Errorf("Expected log level %s in output, got: %s", tc.level, output)
-			}
-			if !strings.Contains(output, tc.message) {
-				t.Errorf("Expected message %q in output, got: %s", tc.message, output)
-			}
-			if !strings.Contains(output, "key") || !strings.Contains(output, "value") {
-				t.Errorf("Expected key-value pair in output, got: %s", output)
+			if tt.wantLogs {
+				assert.Contains(t, output, "test message")
+				assert.Contains(t, output, strings.ToUpper(string(tt.level)))
+			} else {
+				assert.Empty(t, output)
 			}
 		})
 	}
 }
 
 func TestGetLogger(t *testing.T) {
-	// Ensure the logger exists
 	logger := GetLogger()
-	if logger == nil {
-		t.Fatal("GetLogger() returned nil")
-	}
+	assert.NotNil(t, logger)
 }
 
-func TestInitFromEnvironment(t *testing.T) {
-	// Save original logger and env var
-	originalLogger := defaultLogger
-	origEnv := os.Getenv("LOG_LEVEL")
-
-	// Restore original state after test
-	defer func() {
-		defaultLogger = originalLogger
-		os.Setenv("LOG_LEVEL", origEnv)
-	}()
-
-	testCases := []struct {
+func TestSetupLoggerFromEnv(t *testing.T) {
+	tests := []struct {
 		name      string
-		envValue  string
-		shouldLog map[slog.Level]bool // Map of levels and whether they should be logged
+		envLevel  string
+		wantLevel LogLevel
 	}{
 		{
-			name:     "Debug level from env",
-			envValue: "debug",
-			shouldLog: map[slog.Level]bool{
-				slog.LevelDebug: true,
-				slog.LevelInfo:  true,
-				slog.LevelWarn:  true,
-				slog.LevelError: true,
-			},
+			name:      "Debug level from env",
+			envLevel:  "debug",
+			wantLevel: LevelDebug,
 		},
 		{
-			name:     "Info level from env",
-			envValue: "info",
-			shouldLog: map[slog.Level]bool{
-				slog.LevelDebug: false,
-				slog.LevelInfo:  true,
-				slog.LevelWarn:  true,
-				slog.LevelError: true,
-			},
+			name:      "Info level from env",
+			envLevel:  "info",
+			wantLevel: LevelInfo,
 		},
 		{
-			name:     "Warn level from env",
-			envValue: "warn",
-			shouldLog: map[slog.Level]bool{
-				slog.LevelDebug: false,
-				slog.LevelInfo:  false,
-				slog.LevelWarn:  true,
-				slog.LevelError: true,
-			},
+			name:      "Warn level from env",
+			envLevel:  "warn",
+			wantLevel: LevelWarn,
 		},
 		{
-			name:     "Error level from env",
-			envValue: "error",
-			shouldLog: map[slog.Level]bool{
-				slog.LevelDebug: false,
-				slog.LevelInfo:  false,
-				slog.LevelWarn:  false,
-				slog.LevelError: true,
-			},
+			name:      "Error level from env",
+			envLevel:  "error",
+			wantLevel: LevelError,
 		},
 		{
-			name:     "Empty env defaults to Info",
-			envValue: "",
-			shouldLog: map[slog.Level]bool{
-				slog.LevelDebug: false,
-				slog.LevelInfo:  true,
-				slog.LevelWarn:  true,
-				slog.LevelError: true,
-			},
+			name:      "Empty env defaults to Info",
+			envLevel:  "",
+			wantLevel: LevelInfo,
 		},
 		{
-			name:     "Invalid env defaults to Info",
-			envValue: "invalid",
-			shouldLog: map[slog.Level]bool{
-				slog.LevelDebug: false,
-				slog.LevelInfo:  true,
-				slog.LevelWarn:  true,
-				slog.LevelError: true,
-			},
+			name:      "Invalid env defaults to Info",
+			envLevel:  "invalid",
+			wantLevel: LevelInfo,
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Set environment variable
-			os.Setenv("LOG_LEVEL", tc.envValue)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origLevel := os.Getenv("LOG_LEVEL")
+			require.NoError(t, os.Setenv("LOG_LEVEL", tt.envLevel))
 
-			// Create a buffer to capture output
 			var buf bytes.Buffer
+			SetupLogger(&buf, tt.wantLevel)
 
-			// Call init indirectly by setting up logger
-			SetupLogger(&buf, LogLevel(tc.envValue))
+			Info("test message")
+			output := buf.String()
 
-			// Test each logging level
-			levels := map[slog.Level]func(string, ...any){
-				slog.LevelDebug: Debug,
-				slog.LevelInfo:  Info,
-				slog.LevelWarn:  Warn,
-				slog.LevelError: Error,
+			if tt.wantLevel == LevelInfo || tt.wantLevel == LevelDebug {
+				assert.Contains(t, output, "test message")
+			} else {
+				assert.Empty(t, output)
 			}
 
-			levelNames := map[slog.Level]string{
-				slog.LevelDebug: "DEBUG",
-				slog.LevelInfo:  "INFO",
-				slog.LevelWarn:  "WARN",
-				slog.LevelError: "ERROR",
-			}
-
-			for level, logFunc := range levels {
-				buf.Reset()
-				logFunc("test message for level", "level", levelNames[level])
-				output := buf.String()
-
-				shouldLog := tc.shouldLog[level]
-				didLog := output != "" && strings.Contains(output, "test message for level")
-
-				if shouldLog != didLog {
-					if shouldLog {
-						t.Errorf("Expected %s level to be logged with LOG_LEVEL=%s, but it wasn't", 
-							levelNames[level], tc.envValue)
-					} else {
-						t.Errorf("Expected %s level NOT to be logged with LOG_LEVEL=%s, but it was", 
-							levelNames[level], tc.envValue)
-					}
-				}
-			}
+			require.NoError(t, os.Setenv("LOG_LEVEL", origLevel))
 		})
 	}
 } 

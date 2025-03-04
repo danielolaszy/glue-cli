@@ -3,87 +3,131 @@ package config
 import (
 	"os"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoadGitHubConfig(t *testing.T) {
-	// Save original env vars to restore later
-	origToken := os.Getenv("GITHUB_TOKEN")
-	origDomain := os.Getenv("GITHUB_DOMAIN")
-	
-	// Set test token to pass validation
-	os.Setenv("GITHUB_TOKEN", "test_token")
-	
-	// Cleanup after test
-	defer func() {
-		os.Setenv("GITHUB_TOKEN", origToken)
-		os.Setenv("GITHUB_DOMAIN", origDomain)
-	}()
-	
-	testCases := []struct {
-		name           string
-		domain         string
-		expectedDomain string
+	tests := []struct {
+		name     string
+		domain   string
+		token    string
+		wantErr  bool
 	}{
 		{
-			name:           "Explicit github.com",
-			domain:         "github.com",
-			expectedDomain: "github.com",
+			name:     "Explicit github.com",
+			domain:   "github.com",
+			token:    "test-token",
+			wantErr:  false,
 		},
 		{
-			name:           "Custom GitHub domain",
-			domain:         "git.acme-corp.com",
-			expectedDomain: "git.acme-corp.com",
+			name:     "Custom GitHub domain",
+			domain:   "github.example.com",
+			token:    "test-token",
+			wantErr:  false,
 		},
 		{
-			name:           "Empty domain should default to github.com",
-			domain:         "",
-			expectedDomain: "github.com",
+			name:     "Empty domain should default to github.com",
+			domain:   "",
+			token:    "test-token",
+			wantErr:  false,
+		},
+		{
+			name:     "Missing token",
+			domain:   "github.com",
+			token:    "",
+			wantErr:  true,
 		},
 	}
-	
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Set test domain
-			os.Setenv("GITHUB_DOMAIN", tc.domain)
-			
-			// Load config
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Save original env vars
+			origDomain := os.Getenv("GITHUB_DOMAIN")
+			origToken := os.Getenv("GITHUB_TOKEN")
+
+			// Set test env vars
+			require.NoError(t, os.Setenv("GITHUB_DOMAIN", tt.domain))
+			require.NoError(t, os.Setenv("GITHUB_TOKEN", tt.token))
+
+			// Run test
 			config, err := LoadConfig()
-			if err != nil {
-				t.Fatalf("Failed to load config: %v", err)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, config)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, config)
+				if tt.domain == "" {
+					assert.Equal(t, "github.com", config.GitHub.Domain)
+				} else {
+					assert.Equal(t, tt.domain, config.GitHub.Domain)
+				}
+				assert.Equal(t, tt.token, config.GitHub.Token)
 			}
-			
-			// Check domain
-			if config.GitHub.Domain != tc.expectedDomain {
-				t.Errorf("Expected domain %s, got %s", tc.expectedDomain, config.GitHub.Domain)
-			}
+
+			// Restore original env vars
+			require.NoError(t, os.Setenv("GITHUB_DOMAIN", origDomain))
+			require.NoError(t, os.Setenv("GITHUB_TOKEN", origToken))
 		})
 	}
 }
 
-func TestMissingRequiredConfig(t *testing.T) {
-	// Save original env vars to restore later
-	origToken := os.Getenv("GITHUB_TOKEN")
-	
-	// Cleanup after test
-	defer func() {
-		os.Setenv("GITHUB_TOKEN", origToken)
-	}()
-	
-	// Clear required token
-	os.Setenv("GITHUB_TOKEN", "")
-	
-	// Try loading without token
-	_, err := LoadConfig()
-	
-	// Should not error because validateConfig returns nil currently
-	// If validateConfig is later modified to return an error, this test should be updated
-	if err != nil {
-		// Skip test if now validating (comment this out when validation is in place)
-		t.Skipf("Validation now returns error: %v", err)
-		
-		// Once validation is working, the test should check the actual error:
-		// if !strings.Contains(err.Error(), "GITHUB_TOKEN") {
-		//     t.Errorf("Expected error about missing GITHUB_TOKEN, got: %v", err)
-		// }
+func TestValidateJiraConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		baseURL  string
+		username string
+		token    string
+		wantErr  bool
+	}{
+		{
+			name:     "All fields present",
+			baseURL:  "https://jira.example.com",
+			username: "test-user",
+			token:    "test-token",
+			wantErr:  false,
+		},
+		{
+			name:     "Missing base URL",
+			baseURL:  "",
+			username: "test-user",
+			token:    "test-token",
+			wantErr:  true,
+		},
+		{
+			name:     "Missing username",
+			baseURL:  "https://jira.example.com",
+			username: "",
+			token:    "test-token",
+			wantErr:  true,
+		},
+		{
+			name:     "Missing token",
+			baseURL:  "https://jira.example.com",
+			username: "test-user",
+			token:    "",
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &Config{
+				Jira: JiraConfig{
+					BaseURL:  tt.baseURL,
+					Username: tt.username,
+					Token:    tt.token,
+				},
+			}
+
+			err := ValidateJiraConfig(config)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
 	}
 } 

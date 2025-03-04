@@ -1,3 +1,4 @@
+// Package cmd provides the command-line interface for the Glue CLI tool.
 package cmd
 
 import (
@@ -7,32 +8,45 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/danielolaszy/glue/internal/config"
 	"github.com/danielolaszy/glue/internal/github"
 	"github.com/danielolaszy/glue/internal/jira"
 	"github.com/danielolaszy/glue/internal/logging"
 	"github.com/danielolaszy/glue/pkg/models"
 	"github.com/spf13/cobra"
-	"github.com/danielolaszy/glue/internal/config"
-
 )
 
 // jiraCmd represents the command to synchronize GitHub issues with JIRA.
-// It creates JIRA tickets for GitHub issues labeled with the specified JIRA project(s).
+// It creates, updates, and maintains relationships between GitHub issues and JIRA tickets.
 var jiraCmd = &cobra.Command{
 	Use:   "jira",
-	Short: "Synchronize GitHub with JIRA",
+	Short: "Synchronize GitHub issues with JIRA",
 	Long: `Synchronize GitHub issues with JIRA boards.
 
-This command will create JIRA tickets for GitHub issues labeled with the specified JIRA project(s).
+This command performs bidirectional synchronization between GitHub issues and JIRA tickets:
+
+1. Creates JIRA tickets for GitHub issues labeled with specified JIRA project keys
+2. Updates GitHub issue titles to include the corresponding JIRA ticket ID
+3. Establishes parent-child relationships between related tickets based on issue descriptions
+4. Closes JIRA tickets when corresponding GitHub issues are closed
+
 You can specify multiple boards using -b/--board flag multiple times.
 
 Example:
   glue jira -r owner/repo -b PROJ1 -b PROJ2
 
-Issues will be categorized based on their labels:
-- GitHub issues with a 'feature' label will be created as 'Feature' type in JIRA
-- GitHub issues with a 'story' label will be created as 'Story' type in JIRA
-- Other GitHub issues will be created as 'Story' type in JIRA by default`,
+Issues are categorized and processed based on their labels:
+- GitHub issues with a 'feature' label are created as 'Feature' type in JIRA
+- GitHub issues with a 'story' label are created as 'Story' type in JIRA
+- GitHub issues without 'feature' or 'story' labels are skipped, even if they have a project board label
+
+Parent-child relationships:
+- GitHub issues with 'feature' labels can reference other issues in a '## Issues' section
+- The tool will automatically create and maintain these relationships in JIRA
+- If an issue reference is removed, the corresponding JIRA link will be deleted
+
+Closed issue synchronization:
+- When a GitHub issue is closed, its corresponding JIRA ticket will be transitioned to 'Done'`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repository, err := cmd.Flags().GetString("repository")
 		if err != nil {
@@ -180,7 +194,9 @@ func processBoard(repository string, board string, issues []models.GitHubIssue, 
 	}
 
 	// Group issues by type
-	var features, stories, others []models.GitHubIssue
+	var features, stories []models.GitHubIssue
+	skippedCount := 0
+
 	for _, issue := range issues {
 		if hasJiraIDPrefix(issue.Title) {
 			continue // Skip already synced issues
@@ -191,8 +207,18 @@ func processBoard(repository string, board string, issues []models.GitHubIssue, 
 		} else if hasLabel(issue.Labels, "story") {
 			stories = append(stories, issue)
 		} else {
-			others = append(others, issue)
+			// Skip issues without feature or story labels
+			skippedCount++
+			logging.Warn("skipping issue without feature or story label",
+				"issue_number", issue.Number,
+				"title", issue.Title)
 		}
+	}
+
+	if skippedCount > 0 {
+		logging.Warn("skipped issues without feature or story labels",
+			"board", board,
+			"skipped_count", skippedCount)
 	}
 
 	totalSyncCount := 0
@@ -207,21 +233,13 @@ func processBoard(repository string, board string, issues []models.GitHubIssue, 
 		allUpdatedIssues = append(allUpdatedIssues, updatedFeatures...)
 	}
 
-	// Process stories and others
-	for _, group := range []struct {
-		issues []models.GitHubIssue
-		typeID string
-	}{
-		{stories, storyTypeID},
-		{others, storyTypeID},
-	} {
-		updatedIssues, syncCount, err := processIssueGroup(group.issues, group.typeID, board, repository, githubClient, jiraClient)
-		if err != nil {
-			logging.Error("error processing issues", "error", err)
-			continue
-		}
+	// Process stories only (removed 'others' group)
+	updatedStories, syncCount, err := processIssueGroup(stories, storyTypeID, board, repository, githubClient, jiraClient)
+	if err != nil {
+		logging.Error("error processing stories", "error", err)
+	} else {
 		totalSyncCount += syncCount
-		allUpdatedIssues = append(allUpdatedIssues, updatedIssues...)
+		allUpdatedIssues = append(allUpdatedIssues, updatedStories...)
 	}
 
 	// Process hierarchies
@@ -250,6 +268,9 @@ func hasLabel(labels []string, targetLabel string) bool {
 	return false
 }
 
+// parseJiraIDFromTitle extracts a JIRA ticket ID from a GitHub issue title.
+// It looks for a pattern like "[PROJ-123] Issue title" and returns "PROJ-123".
+// If no JIRA ID is found, it returns an empty string.
 func parseJiraIDFromTitle(title string) string {
 	re := regexp.MustCompile(`^\[([\w\-]+)\]`)
 	matches := re.FindStringSubmatch(title)
@@ -259,6 +280,9 @@ func parseJiraIDFromTitle(title string) string {
 	return ""
 }
 
+// findIssuesSection extracts the "## Issues" section from an issue description.
+// It returns the content between "## Issues" and the next section header (if any).
+// If no "## Issues" section is found, it returns an empty string.
 func findIssuesSection(description string) string {
 	parts := strings.Split(description, "## Issues")
 	if len(parts) < 2 {
@@ -272,6 +296,10 @@ func findIssuesSection(description string) string {
 	return parts[1]
 }
 
+// parseChildIssues extracts GitHub issue numbers from links in the "## Issues"
+// section of a description. It returns a slice of issue numbers as integers.
+// The gitHubDomain parameter specifies the domain of the GitHub instance
+// (e.g., "github.com" or a custom enterprise domain).
 func parseChildIssues(description string, gitHubDomain string) []int {
 	var childNums []int
 	issuesSection := findIssuesSection(description)
@@ -301,7 +329,10 @@ func parseChildIssues(description string, gitHubDomain string) []int {
 	return childNums
 }
 
-// processIssueGroup handles creation of JIRA tickets for a group of issues
+// processIssueGroup handles creation of JIRA tickets for a group of GitHub issues.
+// It creates tickets in the specified JIRA board with the given type ID,
+// updates the GitHub issue titles to include the JIRA ticket ID, and returns
+// the updated issues along with a count of successfully synchronized issues.
 func processIssueGroup(issues []models.GitHubIssue, typeID string, board string, repository string, githubClient *github.Client, jiraClient *jira.Client) ([]models.GitHubIssue, int, error) {
 	var updatedIssues []models.GitHubIssue
 	syncCount := 0
@@ -339,7 +370,9 @@ func processIssueGroup(issues []models.GitHubIssue, typeID string, board string,
 	return updatedIssues, syncCount, nil
 }
 
-// buildGitHubToJiraMap creates a mapping of GitHub issue numbers to JIRA IDs
+// buildGitHubToJiraMap creates a mapping of GitHub issue numbers to JIRA ticket IDs.
+// It extracts JIRA IDs from GitHub issue titles and returns a map where the key
+// is the GitHub issue number and the value is the corresponding JIRA ticket ID.
 func buildGitHubToJiraMap(issues []models.GitHubIssue) map[int]string {
 	githubToJira := make(map[int]string)
 	for _, issue := range issues {
@@ -354,6 +387,9 @@ func buildGitHubToJiraMap(issues []models.GitHubIssue) map[int]string {
 }
 
 // processFeatureLinks handles the creation and maintenance of parent-child relationships
+// between JIRA tickets. It processes a GitHub feature issue, extracts child issue references,
+// creates links to child tickets in JIRA, and removes obsolete links.
+// Returns the count of links created and removed, along with any error encountered.
 func processFeatureLinks(feature models.GitHubIssue, githubToJira map[int]string, jiraClient *jira.Client, gitHubDomain string) (int, int, error) {
 	linksCreated := 0
 	linksRemoved := 0
@@ -421,6 +457,9 @@ func processFeatureLinks(feature models.GitHubIssue, githubToJira map[int]string
 }
 
 // establishHierarchies manages the parent-child relationships between issues
+// in both GitHub and JIRA. It builds a mapping between GitHub issues and their
+// corresponding JIRA tickets, then processes feature issues to establish
+// hierarchical relationships based on the "## Issues" section in their descriptions.
 func establishHierarchies(ctx context.Context, ghClient *github.Client, jiraClient *jira.Client, repository string, board string, issues []models.GitHubIssue) error {
 	// Get config for GitHub domain
 	cfg, err := config.LoadConfig()
@@ -473,7 +512,10 @@ func establishHierarchies(ctx context.Context, ghClient *github.Client, jiraClie
 	return nil
 }
 
-// syncClosedIssues handles synchronization of closed GitHub issues to JIRA
+// syncClosedIssues handles synchronization of closed GitHub issues to JIRA.
+// It identifies GitHub issues that have been closed but their corresponding
+// JIRA tickets are still open, and closes those JIRA tickets.
+// Returns the count of JIRA tickets that were closed and any error encountered.
 func syncClosedIssues(repository string, githubClient *github.Client, jiraClient *jira.Client) (int, error) {
 	logging.Info("checking for closed github issues", "repository", repository)
 

@@ -77,6 +77,10 @@ func validateConfig(config *Config) error {
 		missingVars = append(missingVars, "GITHUB_TOKEN")
 	}
 
+	if len(missingVars) > 0 {
+		return fmt.Errorf("missing required environment variables: %v", missingVars)
+	}
+
 	return nil
 }
 
