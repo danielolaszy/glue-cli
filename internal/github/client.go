@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 	"os"
+	"net/http"
 
 	"github.com/danielolaszy/glue/pkg/models"
 	"github.com/google/go-github/v41/github"
@@ -19,6 +20,8 @@ import (
 // Client encapsulates the GitHub API client.
 type Client struct {
 	client *github.Client
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewClient creates a new GitHub client with retries and longer timeout
@@ -29,60 +32,62 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("GITHUB_TOKEN environment variable is required")
 	}
 
+	// Increase timeout to 30 seconds
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	
+	// Create an HTTP client with longer timeouts
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
 	logging.Debug("initializing github client", 
 		"token_length", len(token),
 		"token_prefix", token[:5]+"...") // Only log first 5 chars for security
 
-	// Create GitHub client with OAuth2 transport
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: token},
 	)
-	ctx := context.Background()
+	// Use our custom httpClient as the base client
 	tc := oauth2.NewClient(ctx, ts)
-	tc.Timeout = 30 * time.Second
+	tc.Timeout = httpClient.Timeout
 
 	client := github.NewClient(tc)
 
-	// Test the connection with retries
-	for i := 0; i < 3; i++ { // Try up to 3 times
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		logging.Debug("testing github authentication", "attempt", i+1)
-		user, resp, err := client.Users.Get(ctx, "")
+	// Test authentication
+	maxRetries := 3
+	var user *github.User
+	var err error
+	
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		logging.Debug("testing github authentication",
+			"attempt", attempt)
 		
-		if err == nil && user != nil {
-			logging.Info("github authentication successful",
-				"username", *user.Login)
-			return &Client{
-				client: client,
-			}, nil
+		user, _, err = client.Users.Get(ctx, "")
+		if err == nil {
+			break
 		}
-
-		// Log detailed error information
-		statusCode := 0
-		if resp != nil {
-			statusCode = resp.StatusCode
-		}
-		logging.Error("github authentication failed",
-			"attempt", i+1,
-			"status_code", statusCode,
-			"error", err)
-
-		if resp != nil && (resp.StatusCode == 403 || resp.StatusCode == 401) {
-			// Don't retry auth errors
-			return nil, fmt.Errorf("error testing github token: %v (status: %d)", err, resp.StatusCode)
-		}
-
-		logging.Warn("github authentication attempt failed, retrying...",
-			"attempt", i+1,
-			"error", err)
 		
-		// Wait before retrying
-		time.Sleep(time.Second * time.Duration(i+1))
+		if attempt < maxRetries {
+			logging.Warn("github authentication attempt failed, retrying...",
+				"attempt", attempt,
+				"error", err)
+			time.Sleep(time.Second * time.Duration(attempt))
+		}
 	}
 
-	return nil, fmt.Errorf("error testing github token after retries: context deadline exceeded")
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to authenticate with github: %v", err)
+	}
+
+	logging.Info("github authentication successful",
+		"username", user.GetLogin())
+
+	return &Client{
+		client:  client,
+		ctx:     ctx,
+		cancel:  cancel,
+	}, nil
 }
 
 // GetAllIssues retrieves all open issues from a GitHub repository.
@@ -454,4 +459,74 @@ func (c *Client) GetIssue(repository string, issueNumber int) (models.GitHubIssu
 		Description: *issue.Body,
 		Labels:      labels,
 	}, nil
+}
+
+// GetIssuesWithLabels retrieves all open issues with any of the specified labels
+func (c *Client) GetIssuesWithLabels(repository string, labels []string) ([]models.GitHubIssue, error) {
+	var allIssues []models.GitHubIssue
+	
+	// Start with just getting all open issues
+	query := fmt.Sprintf("repo:%s is:issue is:open", repository)
+	
+	logging.Debug("searching for github issues", 
+		"query", query)
+
+	opts := &github.SearchOptions{
+		ListOptions: github.ListOptions{
+			PerPage: 100,
+		},
+	}
+
+	result, _, err := c.client.Search.Issues(c.ctx, query, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search issues: %v", err)
+	}
+
+	logging.Debug("found issues without label filter",
+		"total_count", result.GetTotal())
+
+	// Now filter by labels in memory
+	for _, issue := range result.Issues {
+		issueLabels := extractLabelsFromIssue(issue)
+		for _, targetLabel := range labels {
+			if hasLabel(issueLabels, targetLabel) {
+				ghIssue := models.GitHubIssue{
+					Number:      issue.GetNumber(),
+					Title:      issue.GetTitle(),
+					Description: issue.GetBody(),
+					Labels:     issueLabels,
+					State:      issue.GetState(),
+					CreatedAt:  issue.GetCreatedAt(),
+					UpdatedAt:  issue.GetUpdatedAt(),
+				}
+				allIssues = append(allIssues, ghIssue)
+				break // Found one matching label, no need to check others
+			}
+		}
+	}
+
+	logging.Debug("filtered issues by labels",
+		"total_matching", len(allIssues),
+		"labels", labels)
+
+	return allIssues, nil
+}
+
+// Helper function to extract labels
+func extractLabelsFromIssue(issue *github.Issue) []string {
+	labels := make([]string, len(issue.Labels))
+	for i, label := range issue.Labels {
+		labels[i] = label.GetName()
+	}
+	return labels
+}
+
+// Add this helper function to the client package
+func hasLabel(labels []string, targetLabel string) bool {
+	for _, label := range labels {
+		if strings.EqualFold(label, targetLabel) {
+			return true
+		}
+	}
+	return false
 }

@@ -1,16 +1,19 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/danielolaszy/glue/internal/config"
 	"github.com/danielolaszy/glue/internal/github"
 	"github.com/danielolaszy/glue/internal/jira"
 	"github.com/danielolaszy/glue/internal/logging"
+	"github.com/danielolaszy/glue/pkg/models"
 	"github.com/spf13/cobra"
+	"github.com/danielolaszy/glue/internal/config"
+
 )
 
 // jiraCmd represents the command to synchronize GitHub issues with JIRA.
@@ -53,7 +56,7 @@ Issues will be categorized based on their labels:
 			"repository", repository,
 			"boards", boards)
 
-		// Initialize clients once, outside the loop
+		// Initialize clients
 		githubClient, err := github.NewClient()
 		if err != nil {
 			return fmt.Errorf("failed to initialize github client: %v", err)
@@ -64,13 +67,44 @@ Issues will be categorized based on their labels:
 			return fmt.Errorf("failed to initialize jira client: %v", err)
 		}
 
-		// Process each board
+		// Get all issues for all boards in a single query
+		issues, err := githubClient.GetIssuesWithLabels(repository, boards)
+		if err != nil {
+			return fmt.Errorf("failed to fetch github issues: %v", err)
+		}
+
+		logging.Info("found github issues",
+			"total_count", len(issues),
+			"boards", boards)
+
+		// Group issues by board
+		issuesByBoard := make(map[string][]models.GitHubIssue)
+		for _, issue := range issues {
+			for _, board := range boards {
+				if hasLabel(issue.Labels, board) {
+					issuesByBoard[board] = append(issuesByBoard[board], issue)
+					logging.Debug("assigned issue to board",
+						"issue", issue.Number,
+						"board", board,
+						"title", issue.Title)
+				}
+			}
+		}
+
+		// Process each board with its pre-filtered issues
 		totalSynced := 0
 		for _, board := range boards {
-			logging.Info("processing board", "board", board)
-			
-			// Get issues labeled with this board
-			syncCount, err := createJiraTickets(repository, board, githubClient, jiraClient)
+			boardIssues := issuesByBoard[board]
+			logging.Info("processing board",
+				"board", board,
+				"issue_count", len(boardIssues))
+
+			if len(boardIssues) == 0 {
+				logging.Warn("no issues found for board", "board", board)
+				continue
+			}
+
+			syncCount, err := processBoard(repository, board, boardIssues, githubClient, jiraClient)
 			if err != nil {
 				logging.Error("error processing board",
 					"board", board,
@@ -78,29 +112,19 @@ Issues will be categorized based on their labels:
 				continue
 			}
 
-			// Establish hierarchies for this board
-			linkCount, err := establishHierarchies(repository, board, githubClient, jiraClient)
-			if err != nil {
-				logging.Error("error establishing hierarchies for board",
-					"board", board,
-					"error", err)
-			}
-
-			// Sync closed issues for this board
-			closeCount, err := syncClosedIssues(repository, board, githubClient, jiraClient)
-			if err != nil {
-				logging.Error("error syncing closed issues for board",
-					"board", board,
-					"error", err)
-			}
-
-			logging.Info("completed processing board",
-				"board", board,
-				"tickets_created", syncCount,
-				"links_created", linkCount,
-				"tickets_closed", closeCount)
-
 			totalSynced += syncCount
+		}
+
+		// After all boards are processed, check and update hierarchies
+		logging.Info("checking issue hierarchies")
+		for _, board := range boards {
+			err := establishHierarchies(context.Background(), githubClient, jiraClient, board, issuesByBoard[board])
+			if err != nil {
+				logging.Error("failed to establish hierarchies for board",
+					"board", board,
+					"error", err)
+				continue
+			}
 		}
 
 		logging.Info("synchronization complete",
@@ -114,6 +138,130 @@ Issues will be categorized based on their labels:
 func init() {
 	rootCmd.AddCommand(jiraCmd)
 	jiraCmd.Flags().StringArrayP("board", "b", []string{}, "JIRA project board(s) to sync with (can be specified multiple times)")
+}
+
+// processBoard handles all operations for a single board
+func processBoard(repository string, board string, issues []models.GitHubIssue, githubClient *github.Client, jiraClient *jira.Client) (int, error) {
+	// Get issue type IDs once for this board
+	featureTypeID, err := jiraClient.GetIssueTypeID(board, "feature")
+	if err != nil {
+		return 0, fmt.Errorf("failed to get 'feature' type ID: %v", err)
+	}
+
+	storyTypeID, err := jiraClient.GetIssueTypeID(board, "story")
+	if err != nil {
+		logging.Warn("failed to get 'story' type ID, using feature type",
+			"board", board)
+		storyTypeID = featureTypeID
+	}
+
+	// Group issues by type
+	var features, stories, others []models.GitHubIssue
+	for _, issue := range issues {
+		if hasJiraIDPrefix(issue.Title) {
+			continue // Skip already synced issues
+		}
+
+		if hasLabel(issue.Labels, "feature") {
+			features = append(features, issue)
+		} else if hasLabel(issue.Labels, "story") {
+			stories = append(stories, issue)
+		} else {
+			others = append(others, issue)
+		}
+	}
+
+	// Create tickets in batches
+	syncCount := 0
+	var updatedFeatures []models.GitHubIssue // Keep track of features with their updated titles
+	
+	// Process features first (they might be parents)
+	for _, issue := range features {
+		ticketID, err := jiraClient.CreateTicketWithTypeID(board, issue, featureTypeID)
+		if err != nil {
+			logging.Error("failed to create feature ticket",
+				"issue_number", issue.Number,
+				"error", err)
+			continue
+		}
+
+		// Update GitHub issue title with JIRA ID
+		newTitle := fmt.Sprintf("[%s] %s", ticketID, issue.Title)
+		err = githubClient.UpdateIssueTitle(repository, issue.Number, newTitle)
+		if err != nil {
+			logging.Error("failed to update github issue title",
+				"issue_number", issue.Number,
+				"error", err)
+			continue
+		}
+
+		// Get the updated issue for hierarchy processing
+		updatedIssue, err := githubClient.GetIssue(repository, issue.Number)
+		if err != nil {
+			logging.Error("failed to fetch updated issue",
+				"issue_number", issue.Number,
+				"error", err)
+			continue
+		}
+
+		updatedFeatures = append(updatedFeatures, updatedIssue)
+		syncCount++
+	}
+
+	// Process stories and others
+	for _, issueGroup := range []struct {
+		issues []models.GitHubIssue
+		typeID string
+	}{
+		{stories, storyTypeID},
+		{others, storyTypeID}, // Default to story type
+	} {
+		for _, issue := range issueGroup.issues {
+			ticketID, err := jiraClient.CreateTicketWithTypeID(board, issue, issueGroup.typeID)
+			if err != nil {
+				logging.Error("failed to create ticket",
+					"issue_number", issue.Number,
+					"error", err)
+				continue
+			}
+
+			newTitle := fmt.Sprintf("[%s] %s", ticketID, issue.Title)
+			err = githubClient.UpdateIssueTitle(repository, issue.Number, newTitle)
+			if err != nil {
+				logging.Error("failed to update github issue title",
+					"issue_number", issue.Number,
+					"error", err)
+				continue
+			}
+
+			syncCount++
+		}
+	}
+
+	// Process hierarchies after all tickets are created, using the updated features
+	if len(updatedFeatures) > 0 {
+		if err := establishHierarchies(context.Background(), githubClient, jiraClient, board, updatedFeatures); err != nil {
+			logging.Error("error establishing hierarchies",
+				"board", board,
+				"error", err)
+		}
+	}
+
+	return syncCount, nil
+}
+
+// Helper functions
+func hasJiraIDPrefix(title string) bool {
+	return regexp.MustCompile(`^\[[A-Z]+-\d+\]`).MatchString(title)
+}
+
+func hasLabel(labels []string, targetLabel string) bool {
+	for _, label := range labels {
+		if strings.EqualFold(label, targetLabel) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractJiraProject searches for a label beginning with "jira-project:" and
@@ -161,142 +309,29 @@ func getJiraIDFromLabels(labels []string) string {
 }
 
 // syncGitHubToJira synchronizes GitHub issues with JIRA tickets for a specific board
-func syncGitHubToJira(repository string, board string) (int, error) {
+func syncGitHubToJira(repository string, board string, githubClient *github.Client, jiraClient *jira.Client) (int, error) {
 	logging.Info("syncing github to jira",
 		"repository", repository,
 		"board", board)
 
-	// Initialize GitHub client
-	githubClient, err := github.NewClient()
+	// Get GitHub issues filtered by board label
+	issues, err := githubClient.GetIssuesWithLabels(repository, []string{board})
 	if err != nil {
-		return 0, fmt.Errorf("failed to initialize github client: %v", err)
+		return 0, fmt.Errorf("failed to fetch github issues: %v", err)
 	}
 
-	// Initialize JIRA client
-	jiraClient, err := jira.NewClient()
+	// Process the board
+	syncCount, err := processBoard(repository, board, issues, githubClient, jiraClient)
 	if err != nil {
-		return 0, fmt.Errorf("failed to initialize jira client: %v", err)
-	}
-
-	// Create Jira tickets for GitHub issues
-	syncCount, err := createJiraTickets(repository, board, githubClient, jiraClient)
-	if err != nil {
-		return 0, fmt.Errorf("error creating jira tickets: %v", err)
-	}
-
-	// Establish hierarchies between related tickets
-	linkCount, err := establishHierarchies(repository, board, githubClient, jiraClient)
-	if err != nil {
-		logging.Error("error establishing hierarchies", "error", err)
-	}
-
-	// Synchronize closed issues
-	closeCount, err := syncClosedIssues(repository, board, githubClient, jiraClient)
-	if err != nil {
-		logging.Error("error synchronizing closed issues", "error", err)
+		return 0, fmt.Errorf("error processing board: %v", err)
 	}
 
 	logging.Info("github to jira sync completed",
 		"repository", repository,
 		"board", board,
-		"tickets_created", syncCount,
-		"links_created", linkCount,
-		"tickets_closed", closeCount)
+		"tickets_created", syncCount)
 
 	return syncCount, nil
-}
-
-// hasLabel checks if a specific label exists in a slice of labels using
-// case-insensitive comparison. It returns true if the label is found.
-func hasLabel(labels []string, targetLabel string) bool {
-	for _, label := range labels {
-		if strings.EqualFold(label, targetLabel) {
-			return true
-		}
-	}
-	return false
-}
-
-// createJiraTickets creates JIRA tickets for GitHub issues with the specified board label
-func createJiraTickets(repository string, board string, githubClient *github.Client, jiraClient *jira.Client) (int, error) {
-	// Get GitHub issues filtered by board label
-	issues, err := githubClient.GetIssuesWithLabel(repository, board)
-	if err != nil {
-		logging.Error("failed to fetch github issues", "error", err)
-		return 0, fmt.Errorf("failed to fetch github issues: %v", err)
-	}
-
-	logging.Info("found github issues",
-		"count", len(issues),
-		"repository", repository,
-		"board", board)
-
-	syncCount := 0
-	for _, issue := range issues {
-		// Check if issue already has a JIRA ID in its title
-		if hasJiraIDPrefix(issue.Title) {
-			logging.Debug("issue already has JIRA ID, skipping",
-				"issue_number", issue.Number,
-				"title", issue.Title)
-			continue
-		}
-
-		// Get issue type IDs for the project
-		featureTypeID, err := jiraClient.GetIssueTypeID(board, "feature")
-		if err != nil {
-			logging.Error("failed to get 'feature' type ID",
-				"board", board,
-				"error", err)
-			continue
-		}
-
-		// Determine issue type based on labels
-		issueTypeID := featureTypeID // default to feature type
-		if hasLabel(issue.Labels, "feature") {
-			issueTypeID = featureTypeID
-		} else if hasLabel(issue.Labels, "story") {
-			storyTypeID, err := jiraClient.GetIssueTypeID(board, "story")
-			if err == nil {
-				issueTypeID = storyTypeID
-			}
-		}
-
-		// Create JIRA ticket
-		ticketID, err := jiraClient.CreateTicketWithTypeID(board, issue, issueTypeID)
-		if err != nil {
-			logging.Error("error creating jira ticket",
-				"repository", repository,
-				"issue_number", issue.Number,
-				"board", board,
-				"error", err)
-			continue
-		}
-
-		// Update GitHub issue title with JIRA ID
-		newTitle := fmt.Sprintf("[%s] %s", ticketID, issue.Title)
-		err = githubClient.UpdateIssueTitle(repository, issue.Number, newTitle)
-		if err != nil {
-			logging.Error("failed to update github issue title",
-				"repository", repository,
-				"issue_number", issue.Number,
-				"error", err)
-			continue
-		}
-
-		logging.Info("created jira ticket and updated github title",
-			"jira_ticket_id", ticketID,
-			"board", board,
-			"repository", repository,
-			"issue_number", issue.Number)
-		syncCount++
-	}
-
-	return syncCount, nil
-}
-
-// hasJiraIDPrefix checks if an issue title starts with a JIRA ID pattern [ABC-123]
-func hasJiraIDPrefix(title string) bool {
-	return regexp.MustCompile(`^\[[A-Z]+-\d+\]`).MatchString(title)
 }
 
 // extractJiraIDFromTitle extracts the JIRA ID from a title if present
@@ -378,104 +413,7 @@ func syncClosedIssues(repository string, board string, githubClient *github.Clie
 	return closeCount, nil
 }
 
-// establishHierarchies creates parent-child relationships in JIRA based on GitHub issue links
-func establishHierarchies(repository string, board string, githubClient *github.Client, jiraClient *jira.Client) (int, error) {
-	// Get GitHub domain from config
-	config, err := config.LoadConfig()
-	if err != nil {
-		return 0, fmt.Errorf("failed to load configuration: %v", err)
-	}
-	gitHubDomain := config.GitHub.Domain
-	if gitHubDomain == "" {
-		gitHubDomain = "github.com" // Default fallback
-	}
-
-	// Get all GitHub issues with the board label
-	issues, err := githubClient.GetIssuesWithLabel(repository, board)
-	if err != nil {
-		return 0, fmt.Errorf("failed to fetch github issues: %v", err)
-	}
-
-	linkCount := 0
-
-	// Find feature issues
-	for _, issue := range issues {
-		// Only process feature issues
-		if !hasLabel(issue.Labels, "feature") {
-			continue
-		}
-
-		// Find the JIRA ID from the title
-		parentJiraID, found := extractJiraIDFromTitle(issue.Title)
-		if !found {
-			logging.Warn("feature issue has no JIRA ID in title, skipping hierarchy",
-				"repository", repository,
-				"issue_number", issue.Number)
-			continue
-		}
-
-		// Parse the child issues from the description using configured GitHub domain
-		childLinks := parseChildIssues(issue.Description, gitHubDomain)
-		if len(childLinks) == 0 {
-			continue
-		}
-
-		logging.Info("found child issues in feature description",
-			"repository", repository,
-			"issue_number", issue.Number,
-			"child_count", len(childLinks))
-
-		// Process each child issue
-		for _, link := range childLinks {
-			childRepo, childIssueNum, err := parseGitHubIssueLink(link, gitHubDomain)
-			if err != nil {
-				logging.Error("failed to parse child issue link",
-					"link", link,
-					"error", err)
-				continue
-			}
-
-			// Get the child issue to check its title
-			childIssue, err := githubClient.GetIssue(childRepo, childIssueNum)
-			if err != nil {
-				logging.Error("failed to fetch child issue",
-					"repository", childRepo,
-					"issue_number", childIssueNum,
-					"error", err)
-				continue
-			}
-
-			// Extract JIRA ID from child issue title
-			childJiraID, found := extractJiraIDFromTitle(childIssue.Title)
-			if !found {
-				logging.Debug("child issue has no JIRA ID in title, skipping link",
-					"repository", childRepo,
-					"issue_number", childIssueNum)
-				continue
-			}
-
-			// Create the parent-child link in JIRA
-			err = jiraClient.CreateParentChildLink(parentJiraID, childJiraID)
-			if err != nil {
-				logging.Error("failed to create parent-child link in JIRA",
-					"parent", parentJiraID,
-					"child", childJiraID,
-					"error", err)
-				continue
-			}
-
-			logging.Info("successfully created parent-child link in JIRA",
-				"parent", parentJiraID,
-				"child", childJiraID)
-			linkCount++
-		}
-	}
-
-	return linkCount, nil
-}
-
-// parseChildIssues extracts GitHub issue links from the "## Issues" section
-// of a GitHub issue description.
+// parseChildIssues extracts GitHub issue numbers from the "## Issues" section
 func parseChildIssues(description string, gitHubDomain string) []string {
 	var childLinks []string
 
@@ -485,36 +423,197 @@ func parseChildIssues(description string, gitHubDomain string) []string {
 		return childLinks
 	}
 
-	// Escape dots and other special characters in the domain
-	escapedDomain := regexp.QuoteMeta(gitHubDomain)
-	pattern := fmt.Sprintf(`https://%s/[^/]+/[^/]+/issues/\d+`, escapedDomain)
-	re := regexp.MustCompile(pattern)
-	matches := re.FindAllString(issuesSection, -1)
+	logging.Debug("found '## issues' section", 
+		"content", issuesSection)
 
-	return matches
+	// Extract GitHub issue numbers using regex
+	escapedDomain := regexp.QuoteMeta(gitHubDomain)
+	pattern := fmt.Sprintf(`https://%s/[^/]+/[^/]+/issues/(\d+)`, escapedDomain)
+	re := regexp.MustCompile(pattern)
+	matches := re.FindAllStringSubmatch(issuesSection, -1)
+
+	// Extract just the issue numbers
+	for _, match := range matches {
+		if len(match) > 1 {
+			childLinks = append(childLinks, match[1])
+		}
+	}
+
+	logging.Debug("parsed child issues",
+		"count", len(childLinks),
+		"issues", childLinks)
+
+	return childLinks
 }
 
-// findIssuesSection extracts the content of the "## Issues" section from a description.
-// It returns the text between "## Issues" and the next section header, if found.
+func establishHierarchies(ctx context.Context, ghClient *github.Client, jiraClient *jira.Client, board string, issues []models.GitHubIssue) error {
+	log := logging.GetLogger()
+
+	// Add counters for created and removed links
+	linksCreated := 0
+	linksRemoved := 0
+
+	// Get config for GitHub domain
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %v", err)
+	}
+
+	// Create a map of GitHub issue numbers to JIRA IDs
+	githubToJira := make(map[int]string)
+	for _, issue := range issues {
+		if jiraID := parseJiraIDFromTitle(issue.Title); jiraID != "" {
+			githubToJira[issue.Number] = jiraID
+		}
+	}
+
+	// Process each feature to establish hierarchies
+	for _, issue := range issues {
+		if !hasLabel(issue.Labels, "feature") {
+			continue
+		}
+
+		parentJiraID := parseJiraIDFromTitle(issue.Title)
+		if parentJiraID == "" {
+			continue
+		}
+
+		// Get child issue numbers from the description using configured domain
+		childNums := parseChildIssues(issue.Description, cfg.GitHub.Domain)
+		if len(childNums) == 0 {
+			continue
+		}
+
+		log.Debug("found child issues in feature description",
+			"parent_jira", parentJiraID,
+			"child_count", len(childNums),
+			"github_domain", cfg.GitHub.Domain)
+
+		// Get existing links
+		existingLinks, err := jiraClient.GetIssueLinks(parentJiraID)
+		if err != nil {
+			log.Error("failed to get existing links",
+				"error", err,
+				"parent", parentJiraID)
+			continue
+		}
+
+		log.Debug("current JIRA links",
+			"parent", parentJiraID,
+			"existing_links", existingLinks)
+
+		// Track which children should exist
+		validChildren := make(map[string]bool)
+
+		// Process each child issue number and build validChildren map
+		for _, numStr := range childNums {
+			num, err := strconv.Atoi(numStr)
+			if err != nil {
+				log.Error("invalid issue number",
+					"number", numStr,
+					"error", err)
+				continue
+			}
+
+			// Get the JIRA ID for this GitHub issue number
+			childJiraID, exists := githubToJira[num]
+			if !exists {
+				log.Debug("no JIRA ID found for GitHub issue",
+					"github_number", num)
+				continue
+			}
+
+			validChildren[childJiraID] = true
+
+			// Only create the link if it doesn't already exist
+			if !existingLinks[childJiraID] {
+				log.Info("creating parent-child link",
+					"parent", parentJiraID,
+					"child", childJiraID)
+
+				err := jiraClient.CreateParentChildLink(parentJiraID, childJiraID)
+				if err != nil {
+					log.Error("failed to create parent-child link",
+						"error", err,
+						"parent", parentJiraID,
+						"child", childJiraID)
+				} else {
+					linksCreated++
+				}
+			} else {
+				log.Debug("keeping existing link",
+					"parent", parentJiraID,
+					"child", childJiraID)
+			}
+		}
+
+		log.Debug("valid children from GitHub",
+			"parent", parentJiraID,
+			"valid_children", validChildren)
+
+		// Remove any existing links that are no longer valid
+		for childID := range existingLinks {
+			if !validChildren[childID] {
+				log.Info("removing outdated parent-child link",
+					"parent", parentJiraID,
+					"child", childID,
+					"reason", "not in GitHub issues section")
+
+				err := jiraClient.DeleteIssueLink(parentJiraID, childID)
+				if err != nil {
+					log.Error("failed to remove parent-child link",
+						"error", err,
+						"parent", parentJiraID,
+						"child", childID)
+				} else {
+					linksRemoved++
+				}
+			} else {
+				log.Debug("keeping existing link",
+					"parent", parentJiraID,
+					"child", childID)
+			}
+		}
+	}
+
+	// Add summary log at the end
+	log.Info("parent-child relationship synchronization complete",
+		"board", board,
+		"relationships_created", linksCreated,
+		"relationships_removed", linksRemoved)
+
+	return nil
+}
+
+// Helper function to check if a link already exists
+func hasExistingLink(links map[string]bool, childID string) bool {
+	return links[childID]
+}
+
+// Helper function to parse JIRA ID from title
+func parseJiraIDFromTitle(title string) string {
+	re := regexp.MustCompile(`^\[([\w\-]+)\]`)
+	matches := re.FindStringSubmatch(title)
+	if len(matches) > 1 {
+		return matches[1]
+	}
+	return ""
+}
+
 func findIssuesSection(description string) string {
-	// Split the description by "## Issues" and take the content after it
 	parts := strings.Split(description, "## Issues")
 	if len(parts) < 2 {
 		return ""
 	}
 
-	// Find the next section header or return the rest of the content
 	nextSectionIdx := strings.Index(parts[1], "## ")
 	if nextSectionIdx != -1 {
 		return parts[1][:nextSectionIdx]
 	}
-
 	return parts[1]
 }
 
-// parseGitHubIssueLink extracts repository and issue number from a GitHub issue URL
 func parseGitHubIssueLink(link string, gitHubDomain string) (string, int, error) {
-	// Escape dots and other special characters in the domain
 	escapedDomain := regexp.QuoteMeta(gitHubDomain)
 	pattern := fmt.Sprintf(`https://%s/([^/]+/[^/]+)/issues/(\d+)`, escapedDomain)
 	re := regexp.MustCompile(pattern)

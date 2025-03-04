@@ -414,50 +414,86 @@ func (c *Client) CheckParentChildLinkExists(parentKey, childKey string) (bool, e
 }
 
 // GetIssueLinkID retrieves the ID of the link between two JIRA issues.
-// It returns the link ID if found, empty string if not found, and an error if the check fails.
 func (c *Client) GetIssueLinkID(parentKey, childKey string) (string, error) {
 	logging.Debug("finding issue link ID in JIRA",
 		"parent", parentKey,
 		"child", childKey)
 
-	// Check if the client is initialized
-	if c.client == nil {
-		return "", fmt.Errorf("jira client not initialized")
-	}
-
-	// Get the child issue with its links
-	childIssue, resp, err := c.client.Issue.Get(childKey, nil)
+	// Get both issues to check links from both sides
+	parentIssue, _, err := c.client.Issue.Get(parentKey, &jira.GetQueryOptions{
+		Expand: "issuelinks",
+	})
 	if err != nil {
-		statusCode := 0
-		if resp != nil {
-			statusCode = resp.StatusCode
+		return "", fmt.Errorf("failed to get parent issue: %v", err)
+	}
+
+	// Log all links on parent issue
+	for _, link := range parentIssue.Fields.IssueLinks {
+		outwardKey := ""
+		if link.OutwardIssue != nil {
+			outwardKey = link.OutwardIssue.Key
 		}
-		return "", fmt.Errorf("failed to get child issue: %v (status: %d)", err, statusCode)
+		inwardKey := ""
+		if link.InwardIssue != nil {
+			inwardKey = link.InwardIssue.Key
+		}
+		
+		logging.Debug("examining parent link",
+			"link_id", link.ID,
+			"type", link.Type.Name,
+			"outward_issue", link.OutwardIssue != nil,
+			"inward_issue", link.InwardIssue != nil,
+			"outward_key", outwardKey,
+			"inward_key", inwardKey)
 	}
 
-	// Check if there are any links
-	if childIssue.Fields.IssueLinks == nil || len(childIssue.Fields.IssueLinks) == 0 {
-		return "", nil
+	// Get child issue as well
+	childIssue, _, err := c.client.Issue.Get(childKey, &jira.GetQueryOptions{
+		Expand: "issuelinks",
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get child issue: %v", err)
 	}
 
-	// Check each link to see if it connects to the parent
+	// Log all links on child issue
 	for _, link := range childIssue.Fields.IssueLinks {
-		// Check outward links (where the child is the inward issue)
-		if link.OutwardIssue != nil && link.OutwardIssue.Key == parentKey {
-			return link.ID, nil
+		outwardKey := ""
+		if link.OutwardIssue != nil {
+			outwardKey = link.OutwardIssue.Key
+		}
+		inwardKey := ""
+		if link.InwardIssue != nil {
+			inwardKey = link.InwardIssue.Key
 		}
 
-		// Check inward links (where the child is the outward issue)
-		if link.InwardIssue != nil && link.InwardIssue.Key == parentKey {
-			return link.ID, nil
+		logging.Debug("examining child link",
+			"link_id", link.ID,
+			"type", link.Type.Name,
+			"outward_issue", link.OutwardIssue != nil,
+			"inward_issue", link.InwardIssue != nil,
+			"outward_key", outwardKey,
+			"inward_key", inwardKey)
+
+		// For "Relates" type links, check both directions
+		if link.Type.Name == "Relates" {
+			if (link.OutwardIssue != nil && link.OutwardIssue.Key == parentKey) ||
+			   (link.InwardIssue != nil && link.InwardIssue.Key == parentKey) {
+				logging.Debug("found matching link to remove",
+					"link_id", link.ID,
+					"parent", parentKey,
+					"child", childKey)
+				return link.ID, nil
+			}
 		}
 	}
 
+	logging.Debug("no matching link found",
+		"parent", parentKey,
+		"child", childKey)
 	return "", nil
 }
 
 // DeleteIssueLink removes a link between two JIRA issues.
-// It returns an error if the deletion fails.
 func (c *Client) DeleteIssueLink(parentKey, childKey string) error {
 	logging.Info("removing parent-child relationship in JIRA",
 		"parent", parentKey,
@@ -478,11 +514,12 @@ func (c *Client) DeleteIssueLink(parentKey, childKey string) error {
 		logging.Debug("no link found to delete",
 			"parent", parentKey,
 			"child", childKey)
-		return nil // No link to delete
+		return nil
 	}
 
 	// Create the request to delete the link
-	req, err := c.client.NewRequest(http.MethodDelete, "rest/api/2/issueLink/"+linkID, nil)
+	// Note: The API endpoint is /rest/api/2/issueLink/{linkId}
+	req, err := c.client.NewRequest(http.MethodDelete, fmt.Sprintf("rest/api/2/issueLink/%s", linkID), nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request for deleting issue link: %v", err)
 	}
@@ -494,12 +531,17 @@ func (c *Client) DeleteIssueLink(parentKey, childKey string) error {
 		if resp != nil {
 			statusCode = resp.StatusCode
 		}
+		logging.Error("failed to delete issue link",
+			"error", err,
+			"status_code", statusCode,
+			"link_id", linkID)
 		return fmt.Errorf("failed to delete issue link: %v (status: %d)", err, statusCode)
 	}
 
 	logging.Info("successfully removed issue link",
 		"parent", parentKey,
-		"child", childKey)
+		"child", childKey,
+		"link_id", linkID)
 
 	return nil
 }
@@ -740,4 +782,56 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 
 	logging.Info("no suitable fix version found")
 	return nil, nil
+}
+
+// GetChildIssues returns the JIRA IDs of all child issues for a given parent
+func (c *Client) GetChildIssues(parentID string) ([]string, error) {
+	issue, _, err := c.client.Issue.Get(parentID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get issue: %v", err)
+	}
+
+	var children []string
+	// Check the subtasks field
+	for _, subtask := range issue.Fields.Subtasks {
+		children = append(children, subtask.Key)
+	}
+
+	return children, nil
+}
+
+// GetIssueLinks returns a map of child JIRA IDs that are linked to the parent
+func (c *Client) GetIssueLinks(issueID string) (map[string]bool, error) {
+	logging.Debug("getting issue links", "issue", issueID)
+	
+	issue, _, err := c.client.Issue.Get(issueID, &jira.GetQueryOptions{
+		Expand: "issuelinks",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get issue: %v", err)
+	}
+
+	children := make(map[string]bool)
+	for _, link := range issue.Fields.IssueLinks {
+		// Log the link type for debugging
+		logging.Debug("found link",
+			"issue", issueID,
+			"type", link.Type.Name,
+			"outward", link.OutwardIssue != nil,
+			"inward", link.InwardIssue != nil)
+
+		// Check both inward and outward links
+		if link.OutwardIssue != nil {
+			children[link.OutwardIssue.Key] = true
+		}
+		if link.InwardIssue != nil {
+			children[link.InwardIssue.Key] = true
+		}
+	}
+
+	logging.Debug("found linked issues",
+		"issue", issueID,
+		"links", children)
+
+	return children, nil
 }
