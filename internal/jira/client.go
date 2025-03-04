@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"sort"
 
 	jira "github.com/andygrunwald/go-jira"
 	"github.com/danielolaszy/glue/internal/logging"
@@ -712,24 +713,27 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 		version  *jira.Version
 		released bool
 		archived bool
+		piNumber int  // Combined PI number (major*100 + minor) for easy comparison
 	}
 
-	var currentPI *piVersion
+	var piVersions []*piVersion
+	
 	// Parse and store PI versions
 	for i := range versions {
 		version := &versions[i]
 		
-		// Skip released or archived versions
+		// Check if version is released or archived
 		released := version.Released != nil && *version.Released
 		archived := version.Archived != nil && *version.Archived
-		if released || archived {
-			logging.Debug("skipping released/archived version",
+		
+		// Skip archived versions as requested
+		if archived {
+			logging.Debug("skipping archived version",
 				"name", version.Name,
-				"released", released,
 				"archived", archived)
 			continue
 		}
-
+		
 		// Try to parse PI version (e.g., "PI 25.1")
 		var major, minor int
 		_, err := fmt.Sscanf(version.Name, "PI %d.%d", &major, &minor)
@@ -738,68 +742,70 @@ func (c *Client) GetDefaultFixVersion(projectKey string) (*jira.FixVersion, erro
 			continue
 		}
 
+		piNumber := major*100 + minor
+		
 		pv := &piVersion{
 			major:    major,
 			minor:    minor,
 			version:  version,
 			released: released,
 			archived: archived,
+			piNumber: piNumber,
 		}
-
+		
 		logging.Debug("found PI version",
 			"name", version.Name,
 			"major", major,
-			"minor", minor)
-
-		// If this is our first version or if it's a better match for current PI
-		if currentPI == nil {
-			currentPI = pv
-			continue
+			"minor", minor,
+			"pi_number", piNumber,
+			"released", released)
+			
+		piVersions = append(piVersions, pv)
+	}
+	
+	// Sort PI versions: unreleased first, then by PI number (higher is more recent)
+	sort.Slice(piVersions, func(i, j int) bool {
+		// First prefer unreleased versions
+		if piVersions[i].released != piVersions[j].released {
+			return !piVersions[i].released
 		}
-
-		// If same major version, prefer lower minor version as it's likely more current
-		if pv.major == currentPI.major && pv.minor < currentPI.minor {
-			currentPI = pv
-			logging.Debug("found better PI version",
-				"name", version.Name,
-				"previous", currentPI.version.Name)
-			continue
-		}
-
-		// If different major version, prefer the higher one as it's more current
-		if pv.major > currentPI.major {
-			currentPI = pv
-			logging.Debug("found newer PI version",
-				"name", version.Name,
-				"previous", currentPI.version.Name)
-		}
+		
+		// Then sort by PI number (higher is more recent)
+		return piVersions[i].piNumber > piVersions[j].piNumber
+	})
+	
+	// Select the best version
+	var selectedPI *piVersion
+	if len(piVersions) > 0 {
+		selectedPI = piVersions[0]
 	}
 
 	// Convert Version to FixVersion
-	if currentPI != nil {
+	if selectedPI != nil {
 		released := false
-		if currentPI.version.Released != nil {
-			released = *currentPI.version.Released
+		if selectedPI.version.Released != nil {
+			released = *selectedPI.version.Released
 		}
 		archived := false
-		if currentPI.version.Archived != nil {
-			archived = *currentPI.version.Archived
+		if selectedPI.version.Archived != nil {
+			archived = *selectedPI.version.Archived
 		}
 		releasedPtr := &released
 		archivedPtr := &archived
 
 		logging.Info("selected fix version",
-			"name", currentPI.version.Name,
-			"id", currentPI.version.ID,
-			"major", currentPI.major,
-			"minor", currentPI.minor,
+			"name", selectedPI.version.Name,
+			"id", selectedPI.version.ID,
+			"major", selectedPI.major,
+			"minor", selectedPI.minor,
+			"pi_number", selectedPI.piNumber,
 			"released", released,
 			"archived", archived)
 
 		return &jira.FixVersion{
-			ID:          currentPI.version.ID,
-			Name:        currentPI.version.Name,
-			Description: currentPI.version.Description,
+			ID:          selectedPI.version.ID,
+			Name:        selectedPI.version.Name,
+			Description: selectedPI.version.Description,
 			Released:    releasedPtr,
 			Archived:    archivedPtr,
 		}, nil
