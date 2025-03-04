@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"sort"
+	"regexp"
 
 	jira "github.com/andygrunwald/go-jira"
 	"github.com/danielolaszy/glue/internal/logging"
@@ -239,161 +240,127 @@ func (c *Client) getCustomField(name string) (string, string, error) {
 	return "", "", fmt.Errorf("custom field '%s' not found", name)
 }
 
-// CreateTicketWithTypeID creates a new JIRA ticket with the specified type ID.
+// CreateTicketWithTypeID creates a new JIRA ticket with a specific issue type ID.
+// It returns the ID of the created ticket or an error if creation fails.
 func (c *Client) CreateTicketWithTypeID(projectKey string, issue models.GitHubIssue, issueTypeID string) (string, error) {
-	if c.client == nil {
-		return "", fmt.Errorf("jira client not initialized")
-	}
+    if c.client == nil {
+       return "", fmt.Errorf("jira client not initialized")
+    }
 
-	// Get the default fix version for the project
-	fixVersion, err := c.GetDefaultFixVersion(projectKey)
-	if err != nil {
-		logging.Error("failed to get default fix version", "error", err)
-		// Continue without fix version
-	}
+    // Get the default fix version for the project
+    fixVersion, err := c.GetDefaultFixVersion(projectKey)
+    if err != nil {
+       logging.Error("failed to get default fix version", "error", err)
+       // Continue without fix version
+    }
 
-	logging.Info("creating jira ticket",
-		"project", projectKey,
-		"title", issue.Title,
-		"type_id", issueTypeID)
+    logging.Info("creating jira ticket",
+       "project", projectKey,
+       "title", issue.Title,
+       "type_id", issueTypeID)
 
-	// Create the basic issue fields
-	issueFields := &jira.IssueFields{
-		Project: jira.Project{
-			Key: projectKey,
-		},
-		Summary:     issue.Title,
-		Description: issue.Description,
-		Type: jira.IssueType{
-			ID: issueTypeID,
-		},
-	}
+    issueFields := &jira.IssueFields{
+       Project: jira.Project{
+          Key: projectKey,
+       },
+       Summary:     issue.Title,
+       Description: issue.Description,
+       Type: jira.IssueType{
+          ID: issueTypeID, // Use issue type ID
+       },
+    }
 
-	// Add fix version if available
-	if fixVersion != nil {
-		issueFields.FixVersions = []*jira.FixVersion{fixVersion}
-		logging.Info("adding fix version to ticket",
-			"version", fixVersion,
-			"version_id", fixVersion.ID)
-	}
+    // Add fix version if available
+    if fixVersion != nil {
+       issueFields.FixVersions = []*jira.FixVersion{fixVersion}
+       logging.Info("adding fix version to ticket",
+          "version_name", fixVersion.Name,
+          "version_id", fixVersion.ID)
+    }
 
-	// Initialize Unknowns map for custom fields
-	issueFields.Unknowns = map[string]interface{}{}
+    // Check if this is a feature type and add required custom fields
+    featureTypeID, err := c.GetIssueTypeID(projectKey, "Feature")
+    if err == nil && featureTypeID == issueTypeID {
+       logging.Debug("adding custom fields for feature type")
 
-	// Try to get Feature Name field ID, but don't error if not found
-	featureNameField, fieldType, err := c.getCustomField("Feature Name")
-	if err != nil {
-		logging.Debug("Feature Name field not found, continuing without it", 
-			"error", err)
-	} else {
-		// Add Feature Name field if we found the field ID
-		issueFields.Unknowns[featureNameField] = issue.Title
-		logging.Debug("adding Feature Name field", 
-			"field_id", featureNameField,
-			"field_type", fieldType,
-			"value", issue.Title)
-	}
+       // Get Feature Name field ID
+       featureNameFieldID, featureNameType, err := c.getCustomField("Feature Name")
+       if err != nil {
+          logging.Error("failed to get Feature Name field ID", "error", err)
+          return "", fmt.Errorf("failed to get Feature Name field ID: %v", err)
+       }
 
-	// For the Primary Feature Work Type field, we'll hardcode both the ID and value
-	// Hardcoded field ID for "Primary Feature Work Type :"
-	const primaryFeatureWorkTypeFieldID = "customfield_13404"
-	const workTypeValue = "Other Non-Application Development activities"
-	
-	// Add the hardcoded field to the issue
-	issueFields.Unknowns[primaryFeatureWorkTypeFieldID] = workTypeValue
-	logging.Debug("adding hardcoded Primary Feature Work Type field", 
-		"field_id", primaryFeatureWorkTypeFieldID,
-		"value", workTypeValue)
+       // Get Primary Feature Work Type field ID
+       workTypeFieldID, workTypeFieldType, err := c.getCustomField("Primary Feature Work Type ")
+       if err != nil {
+          logging.Error("failed to get Primary Feature Work Type field ID", "error", err)
+          return "", fmt.Errorf("failed to get Primary Feature Work Type field ID: %v", err)
+       }
 
-	// Create the issue
-	newIssue := &jira.Issue{
-		Fields: issueFields,
-	}
+       // Initialize Unknowns map if it doesn't exist
+       if issueFields.Unknowns == nil {
+          issueFields.Unknowns = make(map[string]interface{})
+       }
 
-	createdIssue, resp, err := c.client.Issue.Create(newIssue)
-	if err != nil {
-		logging.Error("failed to create jira ticket",
-			"error", err,
-			"status_code", resp.StatusCode)
-		return "", fmt.Errorf("failed to create jira ticket: %v", err)
-	}
+       // Add custom fields to the request with proper formatting based on field type
+       customFields := make(map[string]interface{})
 
-	logging.Info("created jira ticket", "key", createdIssue.Key)
-	return createdIssue.Key, nil
-}
+       // Feature Name is likely a text field, so we can use the value directly
+       customFields[featureNameFieldID] = issue.Title
 
-// LoadIssueTypes loads all issue types for a project into the cache to avoid
-// repeated API calls. It returns an error if loading fails.
-func (c *Client) LoadIssueTypes(projectKey string) error {
-	logging.Debug("loading all issue types for project", "project", projectKey)
+       // Primary Feature Work Type is a select/option field
+       const workTypeValue = "Other Non-Application Development activities"
+       customFields[workTypeFieldID] = map[string]interface{}{
+          "value": workTypeValue,
+       }
 
-	// Create the cache entry for this project if it doesn't exist
-	if _, exists := c.issueTypeCache[projectKey]; !exists {
-		c.issueTypeCache[projectKey] = make(map[string]string)
-	}
+       // Add custom fields to issue fields
+       for id, value := range customFields {
+          issueFields.Unknowns[id] = value
+       }
 
-	// Get all issue types for the project
-	project, _, err := c.client.Project.Get(projectKey)
-	if err != nil {
-		logging.Error("failed to get project", "project", projectKey, "error", err)
-		return err
-	}
+       logging.Debug("added custom fields",
+          "feature_name_id", featureNameFieldID,
+          "feature_name_type", featureNameType,
+          "work_type_id", workTypeFieldID,
+          "work_type_type", workTypeFieldType)
+    }
 
-	logging.Debug("available issue types in project", "project", projectKey)
-	for _, issueType := range project.IssueTypes {
-		typeName := strings.ToLower(issueType.Name)
-		typeID := issueType.ID
+    // Create the issue
+    jiraIssue := &jira.Issue{
+       Fields: issueFields,
+    }
 
-		// Cache the issue type
-		c.issueTypeCache[projectKey][typeName] = typeID
-		logging.Debug("cached issue type", "name", issueType.Name, "id", typeID)
-	}
+    logging.Debug("sending request to jira api")
 
-	return nil
-}
+    newIssue, resp, err := c.client.Issue.Create(jiraIssue)
+    if err != nil {
+       statusCode := 0
+       if resp != nil {
+          statusCode = resp.StatusCode
 
-// CreateParentChildLink establishes a relationship between JIRA tickets using
-// the "Relates" link type. It returns an error if the linking operation fails.
-func (c *Client) CreateParentChildLink(parentKey, childKey string) error {
-	logging.Info("creating parent-child relationship in JIRA",
-		"parent", parentKey,
-		"child", childKey)
+          // Try to get more details about the error
+          body, readErr := io.ReadAll(resp.Body)
+          if readErr == nil {
+             logging.Error("failed to create jira ticket",
+                "error", err,
+                "status_code", statusCode,
+                "response", string(body))
+             return "", fmt.Errorf("failed to create jira ticket: %v (status: %d, response: %s)",
+                err, statusCode, string(body))
+          }
+       }
+       logging.Error("failed to create jira ticket", "error", err, "status_code", statusCode)
+       return "", fmt.Errorf("failed to create jira ticket: %v (status: %d)", err, statusCode)
+    }
 
-	// Check if the client is initialized
-	if c.client == nil {
-		return fmt.Errorf("jira client not initialized")
-	}
+    if newIssue == nil {
+       logging.Error("jira api returned nil issue")
+       return "", fmt.Errorf("jira api returned nil issue")
+    }
 
-	// Use issue linking API instead of parent field
-	linkData := map[string]interface{}{
-		"type": map[string]string{
-			"name": "Relates", // Or another relationship type like "Blocks" or a custom one
-		},
-		"inwardIssue": map[string]string{
-			"key": childKey,
-		},
-		"outwardIssue": map[string]string{
-			"key": parentKey,
-		},
-	}
-
-	// Create the request
-	req, err := c.client.NewRequest(http.MethodPost, "rest/api/2/issueLink", linkData)
-	if err != nil {
-		return fmt.Errorf("failed to create request for linking issues: %v", err)
-	}
-
-	// Send the request
-	resp, err := c.client.Do(req, nil)
-	if err != nil {
-		statusCode := 0
-		if resp != nil {
-			statusCode = resp.StatusCode
-		}
-		return fmt.Errorf("failed to link issues: %v (status: %d)", err, statusCode)
-	}
-
-	return nil
+    logging.Info("created jira ticket", "key", newIssue.Key)
+    return newIssue.Key, nil
 }
 
 // CheckParentChildLinkExists checks if a parent-child link already exists in JIRA.
@@ -1006,4 +973,16 @@ func (c *Client) GetTicketStatus(issueID string) (string, error) {
 		"status", issue.Fields.Status.Name)
 
 	return issue.Fields.Status.Name, nil
+}
+
+// cleanMarkdownHeadings processes a GitHub markdown string to clean up heading syntax
+// It keeps single # headings but completely removes multiple ## or ### etc.
+func cleanMarkdownHeadings(markdown string) string {
+	// Regular expression to match headings with more than one #
+	// (?m) enables multiline mode so ^ matches start of each line
+	// The regex matches 2 or more # characters at the start of a line
+	multipleHashRegex := regexp.MustCompile(`(?m)^(#{2,})\s`)
+	
+	// Remove multiple # completely (replace with empty string)
+	return multipleHashRegex.ReplaceAllString(markdown, "")
 }
